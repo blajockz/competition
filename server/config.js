@@ -25,6 +25,8 @@ export const config = {
   tokenSecret: env.TOKEN_SECRET || '',
 
   trustProxy: bool(env.TRUST_PROXY, false),
+  // header holding the real visitor address, set by a trusted edge (Render: true-client-ip)
+  clientIpHeader: (env.CLIENT_IP_HEADER || '').trim().toLowerCase(),
   eventTimeZone: env.EVENT_TIMEZONE || 'Africa/Casablanca',
   eventName: (env.EVENT_NAME || 'N7 Kickoff Cup').trim().slice(0, 60),
 

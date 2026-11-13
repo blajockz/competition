@@ -148,7 +148,7 @@ export async function createServer(opts = {}) {
 
   /* -------------------------------------------------------------- http -- */
   function clientIp(req) {
-    const ip = pickClientIp(req.headers['x-forwarded-for'] || req.headers['x-real-ip'], req.socket.remoteAddress, cfg.trustProxy);
+    const ip = pickClientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy, cfg.clientIpHeader);
     return ip.slice(0, 64);
   }
 

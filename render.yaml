@@ -1,0 +1,45 @@
+# Render Blueprint: one free web service built from the Dockerfile.
+# Render → New → Blueprint → pick this repository. It asks for the values
+# marked "sync: false" (copy them from your local .env).
+services:
+  - type: web
+    name: competition
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    numInstances: 1            # never more: the live game state lives in one process
+    autoDeployTrigger: commit  # every push to the branch redeploys
+    buildFilter:
+      ignoredPaths:
+        - "**/*.md"
+        - tests/**
+        - deploy/**
+        - docker-compose.yml
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: CLIENT_IP_HEADER
+        value: true-client-ip   # set by Cloudflare in front of Render
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: APP_SYNC_SECRET      # must equal the secret inside supabase/schema.local.sql
+        sync: false
+      - key: ADMIN_ACCESS_CODE
+        sync: false
+      - key: HOST_ACCESS_CODE
+        sync: false
+      - key: TOKEN_SECRET         # signs login sessions; Render generates a random one
+        generateValue: true
+      - key: EVENT_NAME
+        value: N7 Kickoff Cup
+      - key: EVENT_TIMEZONE
+        value: Africa/Casablanca
+      - key: LOCKED_PHONE_FLAG
+        value: "n7sec{3a572180f81e0ea8}"

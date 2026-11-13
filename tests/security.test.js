@@ -46,14 +46,19 @@ test('tokens: signature, binding, expiry', () => {
 import { pickClientIp } from '../server/clientip.js';
 
 test('client address behind proxies', () => {
+  const h = (xff, extra = {}) => ({ 'x-forwarded-for': xff, ...extra });
   // Caddy / nginx: client appended last
-  assert.equal(pickClientIp('41.250.1.9', '172.18.0.3', true), '41.250.1.9');
+  assert.equal(pickClientIp(h('41.250.1.9'), '172.18.0.3', true), '41.250.1.9');
   // platform load balancers with private addresses after the client
-  assert.equal(pickClientIp('41.250.1.9, 10.0.3.4, 100.64.2.1', '10.0.0.7', true), '41.250.1.9');
+  assert.equal(pickClientIp(h('41.250.1.9, 10.0.3.4, 100.64.2.1'), '10.0.0.7', true), '41.250.1.9');
   // a spoofed entry on the left is ignored
-  assert.equal(pickClientIp('1.2.3.4, 41.250.1.9', '10.0.0.7', true), '41.250.1.9');
+  assert.equal(pickClientIp(h('1.2.3.4, 41.250.1.9'), '10.0.0.7', true), '41.250.1.9');
+  // Render: Cloudflare's True-Client-IP wins over a forged X-Forwarded-For
+  assert.equal(pickClientIp(h('1.2.3.4, 41.250.1.9, 172.70.1.1', { 'true-client-ip': '41.250.1.9' }), '10.0.0.7', true, 'true-client-ip'), '41.250.1.9');
+  // header configured but missing: fall back to X-Forwarded-For
+  assert.equal(pickClientIp(h('41.250.1.9'), '10.0.0.7', true, 'true-client-ip'), '41.250.1.9');
   // no proxy trust: socket address only
-  assert.equal(pickClientIp('1.2.3.4', '::ffff:41.250.1.9', false), '41.250.1.9');
+  assert.equal(pickClientIp(h('1.2.3.4'), '::ffff:41.250.1.9', false), '41.250.1.9');
   // nothing public: fall back
-  assert.equal(pickClientIp('', '10.0.0.7', true), '10.0.0.7');
+  assert.equal(pickClientIp({}, '10.0.0.7', true), '10.0.0.7');
 });
