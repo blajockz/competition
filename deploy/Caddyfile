@@ -1,0 +1,17 @@
+# Caddy gets and renews the HTTPS certificate for your domain by itself.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	# compress everything except the live stream (it must not be buffered)
+	@compressible not path /api/stream
+	encode @compressible zstd gzip
+
+	reverse_proxy app:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+		}
+	}
+}

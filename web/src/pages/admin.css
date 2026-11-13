@@ -1,0 +1,42 @@
+/* Admin */
+.admin-tabs { position: sticky; top: 45px; z-index: 25; display: flex; gap: 4px; overflow-x: auto; padding: 8px max(16px, env(safe-area-inset-left)); background: rgba(22, 14, 36, .9); border-bottom: 1px solid var(--line); backdrop-filter: blur(8px); }
+.admin-tabs button { align-self: center; border: 0; background: transparent; padding: 8px 14px; border-radius: 9px; font-weight: 700; color: var(--muted); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+.admin-tabs button:hover { color: var(--text); background: var(--panel); }
+.admin-tabs button.on { color: var(--accent-ink); background: var(--accent); }
+.tab-badge { font-size: 11px; background: rgba(255, 255, 255, .18); border-radius: 999px; padding: 1px 7px; }
+.admin-main { display: grid; gap: 16px; }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.notice { padding: 12px 16px; border-radius: 12px; background: rgba(245, 158, 11, .1); border: 1px solid rgba(245, 158, 11, .4); color: #fcd38a; font-weight: 600; }
+.field.inline { min-width: 180px; }
+.search { max-width: 220px; min-height: 34px !important; }
+.input-sm { min-height: 30px !important; padding: 2px 8px !important; font-size: 13px !important; width: auto !important; max-width: 150px; }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.steps li { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-weight: 700; font-size: 14px; }
+.steps li span { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--panel-2); font-size: 12px; }
+.steps li.done { color: var(--good); }
+.steps li.done span { background: rgba(52, 211, 153, .2); }
+.steps li.now { color: var(--text); border-color: var(--accent); background: rgba(244, 196, 48, .12); }
+.steps li.now span { background: var(--accent); color: var(--accent-ink); }
+.big-timer { font-size: 54px; font-weight: 700; color: var(--gold); line-height: 1; }
+.countdown-note { font-family: var(--display); font-size: 30px; font-weight: 800; color: var(--gold); }
+.admin-feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 360px; overflow: auto; font-size: 14px; }
+.admin-feed li { padding: 6px 8px; border-radius: 8px; background: var(--panel-2); }
+.adj-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 420px; overflow: auto; }
+.adj-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--panel-2); font-size: 14px; }
+.team-admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.team-admin { padding: 0; overflow: hidden; border-color: color-mix(in srgb, var(--c) 50%, transparent); }
+.team-admin header { padding: 10px 12px; display: flex; justify-content: space-between; gap: 8px; font-weight: 800; }
+.tm-members { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.tm-members li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--panel-2); font-size: 14px; }
+.presenter { border-color: rgba(244, 196, 48, .45); }
+.presenter-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) { .presenter-grid { grid-template-columns: 1fr; } }
+.presenter-board { height: min(62vh, 560px); display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+.presenter-board > svg, .presenter-board > .hive-empty { min-height: 0; }
+.presenter-side .ms-phase { font-family: var(--display); font-size: 22px; font-weight: 800; }
+.q-card { display: grid; gap: 8px; padding: 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line-2); }
+.q-card .huruf-q { font-size: 21px; }
+.q-card .huruf-a { font-size: 24px; }
+.small-letter { font-family: 'Alexandria', 'Plex Arabic', sans-serif; font-weight: 800; font-size: 34px; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 12px; background: var(--gold); color: #2a1700; }
+.presenter-tools { border-top: 1px solid var(--line); padding-top: 12px; }
+.admin-page { grid-template-rows: auto auto 1fr; }

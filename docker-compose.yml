@@ -1,0 +1,40 @@
+# Production: the app + Caddy (automatic HTTPS for your domain).
+#   1. Point your domain's DNS (A/AAAA record) to this server.
+#   2. Fill in .env (DOMAIN, ACME_EMAIL, codes and secrets).
+#   3. docker compose up -d --build
+services:
+  app:
+    build: .
+    image: competition-platform:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TRUST_PROXY: "true"   # real client addresses come from Caddy (rate limiting)
+    volumes:
+      - app-data:/data      # local safety copy of the state (Supabase is the main store)
+    expose:
+      - "8080"
+    stop_grace_period: 15s  # time to save the last changes on shutdown
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
