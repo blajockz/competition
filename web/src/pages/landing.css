@@ -21,7 +21,7 @@
   width: min(100% - 40px, var(--wrap)); margin: 0 auto; padding-top: clamp(36px, 7vw, 88px);
   display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr); gap: clamp(28px, 5vw, 72px); align-items: center;
 }
-.lp-title { display: grid; gap: 2px; font-size: clamp(56px, 9.6vw, 128px); font-weight: 800; font-stretch: 80%; line-height: .92; letter-spacing: -0.006em; }
+.lp-title { display: grid; gap: 2px; font-size: clamp(50px, 7.4vw, 108px); font-weight: 800; font-stretch: 80%; line-height: .92; letter-spacing: -0.006em; }
 .lp-title span { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .lp-title small {
   font-family: var(--ui); font-stretch: normal; font-size: clamp(13px, 1.25vw, 16px); font-weight: 700; letter-spacing: 0;
@@ -184,3 +184,14 @@
 @media (prefers-reduced-motion: reduce) {
   .hh-flood, .hh-band, .hh-ring { transition: none; }
 }
+
+/* four games: 2 × 2 on wide screens */
+.lp-games { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.art-quiz { background: radial-gradient(60rem 30rem at 10% -10%, rgba(30, 155, 255, .22), transparent 60%), radial-gradient(40rem 20rem at 100% 110%, rgba(229, 36, 47, .2), transparent 60%), #06070c; }
+.qz-mini { width: 78%; display: grid; gap: 14px; }
+.qz-mini-title { font-family: 'Press Start 2P', monospace; font-size: clamp(16px, 2vw, 22px); text-align: center; background: linear-gradient(180deg, #1e9bff, #4038f0); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(3px 3px 0 #8a1c7c); }
+.qz-mini-bar { height: 8px; border-radius: 99px; background: #222638; overflow: hidden; }
+.qz-mini-bar i { display: block; width: 62%; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #4038f0, #1e9bff); }
+.qz-mini-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.qz-mini-opts i { height: 26px; border-radius: 9px; background: #0e1019; border: 1px solid #222638; }
+.qz-mini-opts i.on { border-color: #1e9bff; background: rgba(30, 155, 255, .14); box-shadow: 0 0 0 1px #1e9bff; }

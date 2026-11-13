@@ -1,21 +1,25 @@
 # Unified Competition Platform
 
-RoboPath + The Locked Phone + the 1v1 Huruf showdown, merged into one live event app
-with a unified scoreboard, team management and real-time sync between three screens:
+RoboPath + The Locked Phone + the N7 Quiz + the 1v1 Huruf showdown, merged into one live
+event app with registration and check-in, a unified scoreboard, team management and
+real-time sync between the screens:
 
 | Screen | URL | Access |
 |---|---|---|
-| Public event page | `https://YOUR-DOMAIN/` | open to everyone: presents the event, live status and standings, "Join your team" |
+| Public event page | `https://YOUR-DOMAIN/` | open to everyone: presents the event, live status and standings |
+| Registration | `https://YOUR-DOMAIN/register` | open: full name, phone, field, year |
+| Check-in | `https://YOUR-DOMAIN/checkin` (scan the QR on the big screen) | the QR code changes every minute |
 | Admin control panel | `https://YOUR-DOMAIN/admin` | `ADMIN_ACCESS_CODE` |
 | Big screen (projector) | `https://YOUR-DOMAIN/host` | `HOST_ACCESS_CODE` |
 | Team devices | `https://YOUR-DOMAIN/play` (or scan the team QR code) | the team's join code |
 
 ---
 
-## Deploy for free on Koyeb (no domain needed)
+## Deploy for free on Render (no domain needed)
 
-See **[DEPLOY-KOYEB.md](DEPLOY-KOYEB.md)**: push to GitHub, connect the repo in
-Koyeb, paste the environment variables, deploy. You get `https://<app>.koyeb.app`.
+See **[DEPLOY-RENDER.md](DEPLOY-RENDER.md)**: push to GitHub, create a Blueprint
+from the repo in Render (it reads `render.yaml`), paste 5 values, deploy.
+You get `https://<service>.onrender.com`.
 
 ## Deploy on your own domain (Docker)
 
@@ -43,7 +47,8 @@ In the Supabase dashboard → **SQL Editor** → New query → paste the whole c
 
 `schema.local.sql` is `schema.sql` with your `APP_SYNC_SECRET` already inserted.
 (If you change `APP_SYNC_SECRET` in `.env`, run the file again with the new value.)
-Running it again later is safe: it never deletes data.
+Running it again later is safe: it never deletes data. **After an update of the app,
+run it again**: it adds the new columns (phone, check-in, quiz) to an existing database.
 
 Check: `select public.cp_ping('<APP_SYNC_SECRET>');` should return `{"ok": true, ...}`.
 
@@ -68,33 +73,48 @@ Use `deploy/docker-compose.no-caddy.yml` (app on `127.0.0.1:8080`) and the examp
 
 ## Event day
 
-1. **Admin → Participants**: add people one by one, or paste/import a CSV
-   (`Full Name, Filière, Year` — year 1, 2 or 3).
-2. **Admin → Event → Generate teams.** Teams are balanced automatically:
+1. **Registration** (before and on the day): students open `/register` (or scan the
+   “Register” QR on the big screen) and give their full name, phone number, field and
+   year. Every registration appears live in **Admin → Participants** (phone numbers are
+   shown to the admin only). **Export Excel** downloads everyone (+ teams once drawn).
+   The admin can also add people at the desk (confirmed at once) or import a CSV
+   (`Full Name, Phone, Field, Year` — the phone is optional).
+2. **Check-in**: Admin → Event → turn on **Check-in**. The big screen shows a QR code
+   that changes every minute (a code stays valid 2–3 minutes, so a photo of it shared
+   outside the room soon stops working). Registered students scan it: the phone they
+   registered with confirms them in one tap; another phone asks for their number;
+   someone who never registered can register there and is confirmed at once.
+   The admin can also tick people present by hand, or “Mark all present”.
+3. **Admin → Event → Generate teams** — only **confirmed** players are placed in teams
+   (check-in closes). Teams are balanced automatically:
    T = ⌈N/4⌉ teams (at least 2), sizes as even as possible (1–4 members:
    6 → 3+3, 5 → 3+2, 2 → 1+1), 3rd- then 2nd-year students are dealt first so every
    team gets a senior when possible. Each team gets a unique name (`Cyber Falcons`…),
    a distinct colour and a join code. You can move members, rename or regenerate in the lobby.
-3. **Big screen**: open `/host`, enter the host code, tap “Enter full screen”.
-   It shows every team with its join code and QR code.
-4. **Teams** open `/play` (or scan their QR), log in, keep or change their team name
+4. **Big screen**: open `/host`, enter the host code, tap “Enter full screen”.
+   During registration it shows the Register / Check-in QR codes and live counts;
+   after the draw, every team with its join code and QR code.
+5. **Teams** open `/play` (or scan their QR), log in, keep or change their team name
    (updates live on the big screen). Their screen stays locked.
-5. **Begin competition** → synchronised 3-2-1-GO on every screen.
-6. Teams play **RoboPath**, then **The Locked Phone**, on their own device. Points
-   are added to their profile automatically; the big screen leaderboard moves live.
-7. **Open challenge phase** (choose the minutes). Mini-games stop for everyone
-   (points earned are kept).
-8. Lower-ranked teams challenge higher-ranked ones. Accepted matches play one at a
+6. **Begin competition** → synchronised 3-2-1-GO on every screen, and a **1:30:00**
+   clock starts on the big screen (setting “Minutes before the challenge phase opens”).
+7. Teams play **RoboPath**, then **The Locked Phone**, then the **N7 Quiz**, on their own
+   device. Points are added automatically; the big screen leaderboard moves live.
+8. When the clock reaches zero the **challenge phase opens by itself** (mini-games stop
+   for everyone, points earned are kept). The admin can add/remove time (±5/±15 min)
+   or open it earlier.
+9. Lower-ranked teams challenge higher-ranked ones. Accepted matches play one at a
    time (queue shown everywhere). Run each match from **Admin → Challenges**
    (presenter console: tap the letter the team names, judge answers, confirm the winner).
-9. **End competition** → podium on the big screen.
+10. **End competition** → podium on the big screen.
 
-### Scoring (every mini-game is worth 0–100)
+### Scoring
 
 | Game | Points |
 |---|---|
 | RoboPath | 6 levels: 10 + 12 + 15 + 18 + 20 + 25 = 100. The server replays every program before giving points. |
 | The Locked Phone | 20 per lock opened (80) + battery bonus when the last lock opens (battery % ÷ 5, max 20). |
+| N7 Quiz | The original quiz scoring: 20 questions (gaming + security, 4 easy / 4 medium / 2 hard each), 20 s each. A correct answer earns 10 × difficulty (×1, ×1.5, ×2) × 40–100 % (faster = more). Max 280. Counted when the team finishes (the score is revealed at the end, like the original). Unanswered questions time out on the server. Leaving the quiz tab is recorded (Admin → Scores, ⇄). |
 | Huruf challenge | Stake = base stake (50) × rank difference, locked when accepted. Winner +stake, loser −stake. |
 | Admin override | Any ± adjustment with a reason (Admin → Scores), can be undone. |
 
@@ -108,6 +128,10 @@ can still be solved later for its points; skipping the last lock gives no batter
   An unanswered request is accepted automatically after 45 s (setting).
 - One match at a time, FIFO queue. Admin can extend the window, cancel a match,
   force a winner, undo a board move or fix a cell.
+- The Huruf screens keep the original huroof-challenge look (Arabic, RTL): the big
+  screen board, the presenter console (Admin → Challenges) and each team's answer
+  button. If the answering team lets the answer clock run out, the question passes
+  to the other team automatically (or the letter stays open if both missed).
 
 ---
 
@@ -163,10 +187,10 @@ server/              Node.js server (no npm dependencies)
   index.js           HTTP API, live stream, static files
   competition.js     state machine, scoring, challenges, views per screen
   teams.js           balanced team generator, names, colours, codes
-  games/             server rules: RoboPath, Locked Phone, Huruf (+ question bank)
+  games/             server rules: RoboPath, Locked Phone, N7 Quiz, Huruf (+ question banks)
   ratelimit.js auth.js db.js config.js
 shared/              code used by server and browser (RoboPath engine, hex board)
-web/                 React app (admin, host, play) + the three game UIs
+web/                 React app (landing, register/check-in, admin, host, play) + the four game UIs
 supabase/schema.sql  database (schema.local.sql = with your secret, do not share)
 deploy/              Caddyfile, nginx example, compose without Caddy
 Dockerfile docker-compose.yml .env.example

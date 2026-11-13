@@ -6,6 +6,8 @@
  *   POST /api/auth/admin {code}     admin login  → { token }
  *   POST /api/auth/host  {code}     big screen   → { token }
  *   POST /api/auth/team  {joinCode} team login   → { token, teamId }
+ *   POST /api/register {…}          a student registers (name, phone, field, year)
+ *   POST /api/checkin {key, …}      a registered student confirms presence (QR on the big screen)
  *   GET  /api/session               who am I (Authorization: Bearer <token>)
  *   GET  /api/stream?token=…        live state (Server-Sent Events)
  *   POST /api/admin {action, …}     admin actions
@@ -56,6 +58,7 @@ export async function createServer(opts = {}) {
     bank,
     timeZone: cfg.eventTimeZone,
     flag: process.env.LOCKED_PHONE_FLAG || 'n7sec{3a572180f81e0ea8}',
+    secret: sha('checkin|' + cfg.tokenSecret),
     now,
   });
   comp.onEvent = (type, payload) => persistence.logEvent(type, payload);
@@ -165,6 +168,7 @@ export async function createServer(opts = {}) {
       "font-src 'self'",
       "connect-src 'self'",
       "media-src 'self' data: blob:",
+      "worker-src 'self' blob:", // the Excel export zips the file in a worker
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -219,6 +223,10 @@ export async function createServer(opts = {}) {
     updateParticipant: (p) => comp.updateParticipant(p),
     removeParticipant: (p) => comp.removeParticipant(p),
     clearParticipants: () => comp.clearParticipants(),
+    setPresence: (p) => comp.setPresence(p),
+    markAllPresent: (p) => comp.markAllPresent(p),
+    setRegistration: (p) => comp.setRegistration(p),
+    extendMainGames: (p) => comp.extendMainGames(p),
     generateTeams: () => comp.generateTeams(),
     backToRegistration: () => comp.backToRegistration(),
     moveParticipant: (p) => comp.moveParticipant(p),
@@ -249,6 +257,9 @@ export async function createServer(opts = {}) {
     lockedHint: { fn: (id) => comp.lockedHint(id), limit: 'attempt' },
     lockedSkip: { fn: (id) => comp.lockedSkip(id), limit: 'skip' },
     lockedGiveUp: { fn: (id) => comp.lockedGiveUp(id) },
+    quizStart: { fn: (id) => comp.quizStart(id) },
+    quizAnswer: { fn: (id, p) => comp.quizAnswer(id, p) },
+    quizReport: { fn: (id, p) => comp.quizReport(id, p) },
     challengeRequest: { fn: (id, p) => comp.requestChallenge(id, p), limit: 'challenge' },
     challengeCancel: { fn: (id, p) => comp.cancelChallenge(id, p) },
     challengeRespond: { fn: (id, p) => comp.respondChallenge(id, p) },
@@ -284,6 +295,22 @@ export async function createServer(opts = {}) {
       const g = limiter.take('global', ip);
       if (!g.ok) return tooMany(res, g.retryAfter);
       return json(res, 200, { ok: true, ...comp.publicView(cfg.eventName) });
+    }
+
+    if ((p === '/api/register' || p === '/api/checkin') && req.method === 'POST') {
+      const g = limiter.take('global', ip);
+      if (!g.ok) return tooMany(res, g.retryAfter);
+      const kind = p === '/api/register' ? 'register' : 'checkin';
+      const rl = limiter.take(kind, ip);
+      if (!rl.ok) return tooMany(res, rl.retryAfter);
+      let body;
+      try {
+        body = await readBody(req, 4096);
+      } catch (e) {
+        return json(res, e.status || 400, { ok: false, error: e.message });
+      }
+      const out = runAction(() => (kind === 'register' ? comp.register(body) : comp.checkIn(body)));
+      return json(res, out.status, out.body);
     }
 
     if (p.startsWith('/api/auth/') && req.method === 'POST') {
@@ -398,7 +425,7 @@ export async function createServer(opts = {}) {
     '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8',
   };
   const staticRoot = path.resolve(cfg.staticDir);
-  const SPA_ROUTES = new Set(['/', '/admin', '/host', '/play', '/join']);
+  const SPA_ROUTES = new Set(['/', '/admin', '/host', '/play', '/join', '/register', '/checkin']);
 
   function serveStatic(req, res, url) {
     let rel;

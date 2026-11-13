@@ -25,6 +25,8 @@ export const LIMITS = {
   skip: { capacity: 10, perSecond: 0.5 }, // per team, "skip this stage"
   buzz: { capacity: 6, perSecond: 4 }, // per team, Huruf buzzer
   challenge: { capacity: 6, perSecond: 0.2 }, // per team, challenge requests
+  register: { capacity: 60, perSecond: 1 }, // per IP, registration form (a whole room may share one address)
+  checkin: { capacity: 90, perSecond: 2 }, // per IP, presence confirmation
 };
 
 // Wrong codes allowed per address before it is blocked for a while.

@@ -18,6 +18,7 @@ export function useMatchSounds(board) {
       pick: 'pick',
       claim: 'correct',
       wrong: 'wrong',
+      timeout: 'notify',
       missed: 'wrong',
       round: 'start',
       roundWon: 'round',

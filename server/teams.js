@@ -158,12 +158,16 @@ export function distribute(participants, rnd = randInt) {
 /** Parses "1", "1st", "1ère", "L1", "3rd Year", "2A"… into 1, 2 or 3 (null if unknown). */
 export function parseYear(v) {
   if (typeof v === 'number') return [1, 2, 3].includes(v) ? v : null;
-  const m = String(v ?? '').match(/[123]/);
+  const t = String(v ?? '');
+  if (t.replace(/\D/g, '').length > 2) return null; // a phone number, not a year
+  const m = t.match(/[123]/);
   return m ? Number(m[0]) : null;
 }
 
+const looksLikePhone = (c) => /^\+?[\d\s().\-]{8,20}$/.test(c) && c.replace(/\D/g, '').length >= 8;
+
 /**
- * Parses pasted CSV/TSV lines: "Full Name, Filière, Year".
+ * Parses pasted CSV/TSV lines: "Full Name, Filière, Year" or "Full Name, Phone, Filière, Year".
  * A header line is skipped. Returns { rows: [{fullName, filiere, year}], errors: [] }.
  */
 export function parseParticipantsText(text) {
@@ -176,10 +180,14 @@ export function parseParticipantsText(text) {
     if (i === 0 && /name|nom/i.test(cells[0]) && cells.length > 1 && !parseYear(cells[cells.length - 1])) return;
     const fullName = cells[0] || '';
     const year = parseYear(cells[cells.length - 1]);
-    const filiere = cells.length >= 3 ? cells.slice(1, -1).join(' ') : '';
+    // middle cells: an optional phone number, then the field
+    const middle = cells.length >= 3 ? cells.slice(1, -1) : [];
+    const phoneAt = middle.findIndex(looksLikePhone);
+    const phone = phoneAt >= 0 ? middle[phoneAt] : '';
+    const filiere = middle.filter((_, k) => k !== phoneAt).join(' ');
     if (!fullName || fullName.length > 80) errors.push(`Line ${i + 1}: missing or too long name`);
     else if (!year) errors.push(`Line ${i + 1}: academic year must be 1, 2 or 3`);
-    else rows.push({ fullName, filiere: filiere.slice(0, 80), year });
+    else rows.push({ fullName, phone, filiere: filiere.slice(0, 80), year });
   });
   return { rows, errors };
 }

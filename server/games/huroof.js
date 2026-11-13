@@ -10,6 +10,7 @@
  *   answer    a side buzzed (or the presenter gave it the turn) and must answer
  *             correct -> the cell is theirs, they pick next
  *             wrong   -> the other side answers without buzzing
+ *             no answer before the clock ends -> same as wrong (turn passes)
  *   missed    both sides failed: another question or another letter
  * A round ends when a side links its two edges. The match ends at `roundsToWin`.
  */
@@ -80,6 +81,7 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
     s.timer = null; // a restart never resumes a running clock
   }
   const undo = [];
+  const bankCounts = { main: bank.filter((q) => q.src !== 'forum').length, extra: bank.filter((q) => q.src === 'forum').length };
 
   const size = () => Math.round(Math.sqrt(s.cells.length)) || s.settings.size;
   const owners = () => s.cells.map((c) => c.o);
@@ -185,6 +187,37 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
     fx(how === 'buzz' ? 'buzz' : 'turn', team);
   }
 
+  /** The answering side missed (wrong answer or clock ran out): the other side gets the turn. */
+  function fail(team, why) {
+    s.tried[team] = true;
+    if (!s.tried[other(team)]) {
+      s.turn = other(team);
+      s.phase = 'answer';
+      startTimer();
+      fx(why === 'timeout' ? 'timeout' : 'wrong', team);
+    } else {
+      s.turn = null;
+      s.timer = null;
+      s.phase = 'missed';
+      fx('missed', team);
+    }
+  }
+
+  /**
+   * Called by the server clock. When the answering side lets its time run out,
+   * the question passes to the other side (or is missed if both have tried).
+   * Returns true when the state changed.
+   */
+  function tick() {
+    if (s.phase !== 'answer' || !s.timer || !isTeam(s.turn)) return false;
+    if (now() < s.timer.ends) return false;
+    snapshot();
+    if (s.q) s.used[s.q.id] = true;
+    s.timeouts = (s.timeouts || 0) + 1;
+    fail(s.turn, 'timeout');
+    return true;
+  }
+
   const err = (message) => ({ ok: false, error: message });
   const ok = () => ({ ok: true });
   const isTeam = (t) => t === 0 || t === 1;
@@ -264,18 +297,7 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
         }
         return ok();
       }
-      s.tried[team] = true;
-      if (!s.tried[other(team)]) {
-        s.turn = other(team);
-        s.phase = 'answer';
-        startTimer();
-        fx('wrong', team);
-      } else {
-        s.turn = null;
-        s.timer = null;
-        s.phase = 'missed';
-        fx('missed', team);
-      }
+      fail(team, 'wrong');
       return ok();
     },
 
@@ -302,6 +324,17 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
       s.cells[i].o = o;
       s.last = null;
       if (o !== -1) checkWin(o);
+      return ok();
+    },
+
+    /** Match settings from the presenter (board size applies from the next round). */
+    settings({ patch }) {
+      if (!patch || typeof patch !== 'object') return err('Invalid settings');
+      const allowed = {};
+      for (const k of ['size', 'roundsToWin', 'answerTime', 'showQuestion', 'extraBank']) {
+        if (k in patch) allowed[k] = patch[k];
+      }
+      s.settings = cleanHuroofSettings({ ...s.settings, ...allowed });
       return ok();
     },
 
@@ -333,7 +366,7 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
   /* ---------------- views ---------------- */
   function base() {
     return {
-      settings: { size: s.settings.size, roundsToWin: s.settings.roundsToWin, answerTime: s.settings.answerTime },
+      settings: { size: s.settings.size, roundsToWin: s.settings.roundsToWin, answerTime: s.settings.answerTime, showQuestion: s.settings.showQuestion },
       phase: s.phase,
       round: s.round,
       score: s.score,
@@ -361,6 +394,7 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
       v.q = s.q;
       v.undo = undo.length;
       v.fullSettings = s.settings;
+      v.bank = bankCounts;
       return v;
     }
     if (role === 'board') {
@@ -381,6 +415,7 @@ export function createHuroof({ bank = [], saved = null, settings = {}, rand = Ma
   return {
     act,
     buzz,
+    tick,
     view,
     serialize: () => clone(s),
     get state() { return s; },

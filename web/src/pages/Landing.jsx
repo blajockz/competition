@@ -7,12 +7,13 @@ import { clock, inkOn } from '../lib/format.js';
 import { MuteButton } from '../components/common.jsx';
 import HeroHive from '../components/HeroHive.jsx';
 import '../games/huroof/huroof.css';
+import '@fontsource/press-start-2p/latin-400.css';
 import './landing.css';
 
 const PHASES = [
-  { key: 'REGISTRATION', title: 'Registration', text: 'The organisers register everyone with their track and year.' },
-  { key: 'LOBBY_LOCKED', title: 'Teams and lobby', text: 'Balanced teams are drawn. Each team logs in, sees its colour and picks a name.' },
-  { key: 'MAIN_GAMES', title: 'The gauntlet', text: 'Countdown, then every team plays RoboPath and the Locked Phone on its own device.' },
+  { key: 'REGISTRATION', title: 'Register & check in', text: 'Register online with your phone. On the day, scan the check-in code on the big screen to confirm you are here.' },
+  { key: 'LOBBY_LOCKED', title: 'Teams and lobby', text: 'Balanced teams are drawn from the players in the room. Each team logs in, sees its colour and picks a name.' },
+  { key: 'MAIN_GAMES', title: 'The gauntlet', text: 'Countdown, then 1 h 30 for RoboPath, the Locked Phone and the N7 Quiz, each team on its own device.' },
   { key: 'CHALLENGE_WINDOW', title: 'Challenge window', text: 'Lower-ranked teams challenge the teams above them in live Huruf matches.' },
   { key: 'FINISHED', title: 'Podium', text: 'Scores freeze and the final standings go up on the big screen.' },
 ];
@@ -23,14 +24,19 @@ const phaseIndex = (status) => {
 };
 
 function StatusLine({ data }) {
-  useTicker(1000, data?.status === 'CHALLENGE_WINDOW' || data?.status === 'COUNTDOWN');
+  useTicker(1000, data?.status === 'CHALLENGE_WINDOW' || data?.status === 'COUNTDOWN' || data?.status === 'MAIN_GAMES');
   if (!data) return <p className="lp-status" aria-live="polite"><span className="lp-dot" />Checking the event status</p>;
   const now = Date.now() + (data.offset || 0);
   let text;
   let live = false;
   switch (data.status) {
     case 'REGISTRATION':
-      text = data.participantCount ? `Registration is open: ${data.participantCount} players so far.` : 'Registration is open.';
+      text = data.checkinOpen
+        ? `Check-in is open: ${data.confirmedCount} of ${data.participantCount} players confirmed.`
+        : data.registrationOpen
+          ? (data.participantCount ? `Registration is open: ${data.participantCount} players so far.` : 'Registration is open.')
+          : 'Registration is closed. Teams are drawn soon.';
+      live = !!data.checkinOpen;
       break;
     case 'LOBBY_LOCKED':
       text = `Teams are in the lobby: ${data.claimedCount} of ${data.teamCount} logged in.`;
@@ -40,10 +46,12 @@ function StatusLine({ data }) {
       text = 'The gauntlet is about to start.';
       live = true;
       break;
-    case 'MAIN_GAMES':
-      text = `Live now: ${data.teamCount} teams are playing the mini-games.`;
+    case 'MAIN_GAMES': {
+      const left = data.mainGamesEndsAt ? Math.max(0, (data.mainGamesEndsAt - now) / 1000) : 0;
+      text = `Live now: ${data.teamCount} teams are playing the mini-games${left > 0 ? `, ${clock(left)} left` : ''}.`;
       live = true;
       break;
+    }
     case 'CHALLENGE_WINDOW': {
       const left = Math.max(0, (data.challengeTimerEnd - now) / 1000);
       text = left > 0 ? `Challenge window open, ${clock(left)} left.` : 'Challenge window closed, last matches in play.';
@@ -125,6 +133,18 @@ function PhoneArt() {
   );
 }
 
+function QuizArt() {
+  return (
+    <div className="art art-quiz" aria-hidden="true">
+      <div className="qz-mini">
+        <span className="qz-mini-title">N7 QUIZ</span>
+        <span className="qz-mini-bar"><i /></span>
+        <span className="qz-mini-opts"><i /><i className="on" /><i /><i /></span>
+      </div>
+    </div>
+  );
+}
+
 function HurufArt() {
   // حروف, written right to left, one hexagon per letter
   const letters = [['ف', '#3B82F6'], ['و', null], ['ر', '#F59E0B'], ['ح', '#3B82F6']];
@@ -160,6 +180,10 @@ export default function Landing() {
   const current = phaseIndex(data?.status);
   const stake = data?.baseChallengeStake ?? 50;
   const denials = data?.maxDenials ?? 2;
+  const canRegister = !data || (data.status === 'REGISTRATION' && (data.registrationOpen || data.checkinOpen));
+  const primary = canRegister
+    ? { href: data?.checkinOpen ? '/checkin' : '/register', label: data?.checkinOpen ? 'Check in' : 'Register' }
+    : { href: '/play', label: 'Join your team' };
 
   return (
     <div className="lp">
@@ -176,7 +200,7 @@ export default function Landing() {
         </nav>
         <div className="lp-nav-actions">
           <MuteButton />
-          <a className="btn btn-primary" href="/play">Join your team</a>
+          <a className="btn btn-primary" href={primary.href}>{primary.label}</a>
         </div>
       </header>
 
@@ -186,16 +210,19 @@ export default function Landing() {
             <h1 className="lp-title">
               <span>Solve it.<small>RoboPath</small></span>
               <span>Crack it.<small>The Locked Phone</small></span>
+              <span>Know it.<small>N7 Quiz</small></span>
               <span>Claim it.<small>Huruf showdown</small></span>
             </h1>
             <p className="lp-lead">
               {name} is the joint evening of N7GD and N7SEC. Teams of up to four, mixed across years,
-              program a ghost through a maze, break into a missing president’s phone, then fight for points
-              letter by letter. Every point lands on one shared leaderboard.
+              program a ghost through a maze, break into a missing president’s phone, race through a gaming
+              and security quiz, then fight for points letter by letter. Every point lands on one shared leaderboard.
             </p>
             <div className="lp-cta">
-              <a className="btn btn-primary btn-lg" href="/play">Join your team</a>
-              <a className="btn btn-ghost btn-lg" href="#games">How it works</a>
+              <a className="btn btn-primary btn-lg" href={primary.href} data-testid="lp-primary">{primary.label}</a>
+              {canRegister
+                ? <a className="btn btn-ghost btn-lg" href="/play">Join your team</a>
+                : <a className="btn btn-ghost btn-lg" href="#games">How it works</a>}
             </div>
             <StatusLine data={data} />
           </div>
@@ -208,8 +235,8 @@ export default function Landing() {
 
         <section className="lp-section" id="games" aria-labelledby="games-title">
           <div className="lp-section-head">
-            <h2 id="games-title">Three games, played in order</h2>
-            <p>The two mini-games are worth up to 100 points each, so no single game decides the night.</p>
+            <h2 id="games-title">Four games, played in order</h2>
+            <p>Three mini-games in 1 h 30, then the challenge phase opens on its own. Every point lands on the same leaderboard.</p>
           </div>
           <ol className="lp-games">
             <li className="game-robo">
@@ -230,10 +257,19 @@ export default function Landing() {
                 <p className="g-points">20 points per lock, plus a battery bonus</p>
               </div>
             </li>
+            <li className="game-quiz">
+              <QuizArt />
+              <div className="g-text">
+                <span className="g-num">3</span>
+                <h3>N7 Quiz</h3>
+                <p>Twenty questions on gaming and security, in English or French, twenty seconds each. You only learn your score at the very end.</p>
+                <p className="g-points">Up to 280 points: right and fast scores most</p>
+              </div>
+            </li>
             <li className="game-huruf">
               <HurufArt />
               <div className="g-text">
-                <span className="g-num">3</span>
+                <span className="g-num">4</span>
                 <h3>Huruf showdown</h3>
                 <p>Once the mini-games close, lower-ranked teams challenge the teams above them. Buzz first, answer for a letter, and link your two sides of the board.</p>
                 <p className="g-points">{stake} points for every rank between the two teams</p>
@@ -298,11 +334,23 @@ export default function Landing() {
         </section>
 
         <section className="lp-final">
-          <div>
-            <h2>Got your join code?</h2>
-            <p>It is on the big screen next to your team’s name. You can also scan your team’s QR code.</p>
-          </div>
-          <a className="btn btn-primary btn-lg" href="/play">Join your team</a>
+          {canRegister ? (
+            <>
+              <div>
+                <h2>{data?.checkinOpen ? 'You’re here? Check in.' : 'Save your seat.'}</h2>
+                <p>{data?.checkinOpen ? 'Scan the code on the big screen, or open the check-in page and use your phone number.' : 'Register with your name, phone, field and year. On the day, check in to get a team.'}</p>
+              </div>
+              <a className="btn btn-primary btn-lg" href={primary.href}>{primary.label}</a>
+            </>
+          ) : (
+            <>
+              <div>
+                <h2>Got your join code?</h2>
+                <p>It is on the big screen next to your team’s name. You can also scan your team’s QR code.</p>
+              </div>
+              <a className="btn btn-primary btn-lg" href="/play">Join your team</a>
+            </>
+          )}
         </section>
       </main>
 

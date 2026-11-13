@@ -9,8 +9,7 @@ import {
   BrandBar, CodeLogin, ConnectionBadge, CountdownOverlay, FullscreenGuard, GoFlash, QR, TeamDot,
 } from '../components/common.jsx';
 import Leaderboard from '../components/Leaderboard.jsx';
-import HuroofBoard from '../games/huroof/HuroofBoard.jsx';
-import { AnswerClock, phaseText, RoundScore, useMatchSounds } from '../games/huroof/MatchParts.jsx';
+import { HfStage } from '../games/huroof/Original.jsx';
 import './host.css';
 
 export default function Host() {
@@ -23,7 +22,7 @@ export default function Host() {
         subtitle="Enter the host code on the computer connected to the projector."
         label="Host code"
         stageTitle="Up on the big screen"
-        stageText="Teams and their join codes, the countdown, the live leaderboard and every Huruf match, shown to the whole room."
+        stageText="Registration and check-in QR codes, teams and their join codes, the 1:30 game clock, the live leaderboard and every Huruf match, shown to the whole room."
         placeholder="HST-XXXX-XXXX"
         busy={busy}
         error={error}
@@ -44,17 +43,21 @@ function HostScreen({ token, onLogout }) {
   const now = serverNow(state);
 
   let body;
-  if (status === 'REGISTRATION') body = <Splash />;
+  if (status === 'REGISTRATION') body = <RegistrationWall state={state} now={now} />;
   else if (status === 'LOBBY_LOCKED' || status === 'COUNTDOWN') body = <LobbyWall state={state} />;
   else if (status === 'MAIN_GAMES') body = <MainBoard state={state} />;
-  else if (status === 'CHALLENGE_WINDOW') body = state.match ? <MatchStage state={state} /> : <ChallengeBoard state={state} />;
+  else if (status === 'CHALLENGE_WINDOW') body = state.match ? <MatchStage state={state} now={now} /> : <ChallengeBoard state={state} />;
   else body = <Podium state={state} />;
 
   const end = state.competition.challengeTimerEnd;
+  const gamesEnd = state.competition.mainGamesEndsAt;
+  let clockEl = null;
+  if (status === 'CHALLENGE_WINDOW' && end) clockEl = <WindowClock end={end} now={now} />;
+  else if (status === 'MAIN_GAMES' && gamesEnd) clockEl = <GamesClock end={gamesEnd} now={now} />;
   return (
     <FullscreenGuard title="Big screen ready" text="Tap to put the big screen in full screen and turn the sound on.">
       <div className="host-page">
-        <BrandBar right={status === 'CHALLENGE_WINDOW' && end ? <WindowClock end={end} now={now} /> : null}>
+        <BrandBar right={clockEl}>
           <span className="brand-title">{titleFor(status)}</span>
         </BrandBar>
         <main className="host-main">{body}</main>
@@ -72,10 +75,10 @@ function HostScreen({ token, onLogout }) {
 
 function titleFor(status) {
   return {
-    REGISTRATION: 'Welcome!',
+    REGISTRATION: 'Registration & check-in',
     LOBBY_LOCKED: 'Find your team',
     COUNTDOWN: 'Get ready…',
-    MAIN_GAMES: 'Mini-game gauntlet · Live leaderboard',
+    MAIN_GAMES: 'Mini-games · Live leaderboard',
     CHALLENGE_WINDOW: 'Challenge phase · 1v1 Huruf showdown',
     FINISHED: 'Final results',
   }[status] || '';
@@ -91,20 +94,105 @@ function WindowClock({ end, now }) {
   );
 }
 
-/* --------------------------------------------------------- splash -- */
-function Splash() {
+/** The 1:30:00 clock of the mini-games: the challenge phase opens when it reaches zero. */
+function GamesClock({ end, now }) {
+  const left = Math.max(0, (end - now) / 1000);
   return (
-    <div className="splash">
-      <div className="splash-logos">
-        <span className="logo-chip light"><img src="/logos/n7gd.png" alt="N7GD" /></span>
-        <span className="brand-x">×</span>
-        <span className="logo-chip dark"><img src="/logos/n7sec.png" alt="N7SEC" /></span>
-      </div>
-      <h1>The Competition</h1>
-      <p>RoboPath · The Locked Phone · 1v1 Huruf showdown</p>
-      <p className="muted">Registration in progress. Teams appear here in a moment.</p>
+    <div className={`host-clock games ${left < 300 ? 'urgent' : ''}`} data-testid="games-clock">
+      <small>{left > 0 ? 'Challenge phase in' : 'Time is up'}</small>
+      <b className="mono">{clock(left)}</b>
     </div>
   );
+}
+
+/* --------------------------------------------- registration & check-in -- */
+function RegistrationWall({ state, now }) {
+  const reg = state.registration;
+  const origin = window.location.origin;
+  const host = origin.replace(/^https?:\/\//, '');
+  const slotLeft = reg.slotMs ? 1 - ((now % reg.slotMs) / reg.slotMs) : 0;
+  const checkinUrl = reg.checkinKey ? `${origin}/checkin?k=${reg.checkinKey}` : '';
+  const seen = useRef(null);
+  const fresh = new Set();
+  if (seen.current === null) seen.current = new Set(reg.recent.map((p) => p.id));
+  for (const p of reg.recent) {
+    if (!seen.current.has(p.id)) fresh.add(p.id);
+  }
+  useEffect(() => {
+    if (!fresh.size) return;
+    sfx.play('notify');
+    reg.recent.forEach((p) => seen.current.add(p.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reg.recent]);
+
+  return (
+    <div className={`reg-wall ${reg.checkinOpen ? 'with-checkin' : ''}`}>
+      <section className="reg-panel reg-signup">
+        <header>
+          <span className="reg-step">1</span>
+          <div>
+            <h2>Register</h2>
+            <p>Scan with your phone camera. Full name, phone, field and year: thirty seconds.</p>
+          </div>
+        </header>
+        <div className="reg-qr-wrap">
+          <QR text={`${origin}/register`} size={reg.checkinOpen ? 'min(19vw, 32vh)' : 'min(30vw, 50vh)'} />
+        </div>
+        <p className="reg-url mono">{host}/register</p>
+        {!reg.registrationOpen && <p className="pill warn">Online registration is closed. Register on site with the check-in code.</p>}
+      </section>
+
+      <section className={`reg-panel reg-checkin ${reg.checkinOpen ? 'open' : ''}`}>
+        <header>
+          <span className="reg-step">2</span>
+          <div>
+            <h2>Check in</h2>
+            <p>{reg.checkinOpen ? 'You are here? Scan this code to confirm your presence. Only confirmed players get a team.' : 'Opens on event day, right before the games. Teams are drawn from confirmed players only.'}</p>
+          </div>
+        </header>
+        {reg.checkinOpen ? (
+          <>
+            <div className="reg-qr-wrap live" data-testid="checkin-qr" data-url={checkinUrl}>
+              <QR text={checkinUrl} size="min(30vw, 50vh)" />
+              <svg className="reg-ring" viewBox="0 0 100 100" aria-hidden="true">
+                <rect x="2" y="2" width="96" height="96" rx="10" pathLength="100" style={{ strokeDashoffset: 100 - slotLeft * 100 }} />
+              </svg>
+            </div>
+            <p className="reg-url"><span className="pill accent">The code changes every minute</span></p>
+          </>
+        ) : (
+          <div className="reg-closed">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+            <span>Check-in is not open yet</span>
+          </div>
+        )}
+      </section>
+
+      <aside className="reg-side">
+        <div className="reg-counters">
+          <div><b className="mono" data-testid="reg-count">{reg.registered}</b><small>registered</small></div>
+          <div className="good"><b className="mono" data-testid="confirmed-count">{reg.confirmed}</b><small>here &amp; confirmed</small></div>
+        </div>
+        <div className="reg-meter" aria-hidden="true"><i style={{ width: `${reg.registered ? (reg.confirmed / reg.registered) * 100 : 0}%` }} /></div>
+        <h3>Just checked in</h3>
+        <ul className="reg-recent">
+          {reg.recent.length === 0 && <li className="muted">Nobody yet.</li>}
+          {reg.recent.map((p) => (
+            <li key={p.id} className={fresh.has(p.id) ? 'fresh' : ''}>
+              <span className="reg-avatar">{initials(p.name)}</span>
+              <span><b>{p.name}</b><small>{p.filiere}{p.filiere ? ' · ' : ''}{yearLabel(p.year)}</small></span>
+            </li>
+          ))}
+        </ul>
+        <p className="reg-games">RoboPath · The Locked Phone · N7 Quiz · 1v1 Huruf showdown</p>
+      </aside>
+    </div>
+  );
+}
+
+function initials(name) {
+  const parts = String(name || '').trim().split(/\s+/);
+  return ((parts[0]?.[0] || '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
 /* ---------------------------------------------------------- lobby -- */
@@ -150,6 +238,7 @@ function LobbyWall({ state }) {
 function Progress({ team }) {
   const rp = team.games.robopath;
   const lp = team.games.locked_phone;
+  const qz = team.games.quiz;
   return (
     <>
       <span className="prog">
@@ -169,7 +258,14 @@ function Progress({ team }) {
         {lp.points}
         {lp.status === 'dead' && ' 🔋✗'}
       </span>
-      {team.currentGameIndex >= 2 && <span className="pill good">done</span>}
+      <span className="prog">
+        Quiz
+        <span className="pips quiz">
+          <i className={qz.answered >= qz.total ? 'on' : qz.answered > 0 ? 'half' : ''} style={{ '--q': `${(qz.answered / qz.total) * 100}%` }} />
+        </span>
+        {['completed', 'abandoned'].includes(qz.status) ? qz.points : qz.status === 'playing' ? `${qz.answered}/${qz.total}` : '–'}
+      </span>
+      {team.currentGameIndex >= 3 && <span className="pill good">done</span>}
     </>
   );
 }
@@ -264,53 +360,22 @@ function ChallengeBoard({ state }) {
   );
 }
 
-function MatchStage({ state }) {
+function MatchStage({ state, now }) {
   const m = state.match;
-  const board = m.board;
   const a = state.teams.find((t) => t.id === m.challenge.challengerTeamId);
   const b = state.teams.find((t) => t.id === m.challenge.defenderTeamId);
-  const names = [a?.name, b?.name];
-  const colors = [a?.colorHex, b?.colorHex];
-  useMatchSounds(board);
-  const side = (t, i) => {
-    const active = (board.phase === 'answer' && board.turn === i) || (board.phase === 'pick' && board.chooser === i);
-    const out = board.phase === 'question' && board.tried[i];
-    return (
-      <div className={`ms-team ${active ? 'active' : ''} ${out ? 'out' : ''} ${board.buzzer === i && board.phase === 'answer' ? 'buzzed' : ''}`} style={{ '--c': t?.colorHex, '--ink': inkOn(t?.colorHex) }}>
-        <small>{i === 0 ? 'Challenger · links ↔' : 'Defender · links ↕'}</small>
-        <h2>{t?.name}</h2>
-        <span className="ms-rank">#{i === 0 ? m.challenge.challengerRank : m.challenge.defenderRank}</span>
-        {board.phase === 'answer' && board.turn === i && <span className="ms-flag">{board.buzzer === i ? 'BUZZED!' : 'Answers'}</span>}
-      </div>
-    );
-  };
+  const end = state.competition.challengeTimerEnd;
   return (
-    <div className="match-stage">
-      <div className="ms-top">
-        {side(a, 0)}
-        <div className="ms-mid">
-          <span className="ms-stake">±{m.challenge.lockedPointStake} pts</span>
-          <RoundScore board={board} colors={colors} />
-          <AnswerClock board={board} offset={state.offset} big />
-        </div>
-        {side(b, 1)}
-      </div>
-      <div className="ms-body">
-        <div className="ms-board">
-          <HuroofBoard board={board} colors={colors} names={names} />
-        </div>
-        <aside className="side-col">
-          <section className="card ms-q">
-            <p className="ms-phase">{phaseText(board, names)}</p>
-            {board.sel >= 0 && board.cells[board.sel] && <div className="ms-letter">{board.cells[board.sel].l}</div>}
-            {board.q?.q && <p className="huruf-q">{board.q.q}</p>}
-            {board.q?.a && <p className="huruf-a">{board.q.a}</p>}
-            {board.last?.a && board.phase === 'pick' && <p className="muted small">Last answer: <span className="huruf-a">{board.last.a}</span></p>}
-          </section>
-          <QueuePanel state={state} />
-        </aside>
-      </div>
-    </div>
+    <HfStage
+      board={m.board}
+      names={[a?.name, b?.name]}
+      colors={[a?.colorHex, b?.colorHex]}
+      teams={[a, b]}
+      offset={state.offset}
+      stake={m.challenge.lockedPointStake}
+      clockText={end ? clock(Math.max(0, (end - now) / 1000)) : ''}
+      clockUrgent={!!end && end - now < 60000}
+    />
   );
 }
 

@@ -95,6 +95,19 @@ export const SOUNDS = {
   lowBattery: [{ f: 440, d: 0.1, type: 'square', v: 0.35 }, { f: 330, t: 0.14, d: 0.16, type: 'square', v: 0.35 }],
   powerOff: [{ f: 500, to: 60, d: 0.9, type: 'sawtooth', v: 0.4 }],
   glitch: [{ f: 90, to: 1800, d: 0.25, type: 'sawtooth', v: 0.25 }, { f: 1800, to: 90, t: 0.3, d: 0.25, type: 'sawtooth', v: 0.25 }],
+
+  // N7 Quiz (same notes as the original quiz)
+  qStart: [392, 523, 659, 784].map((f, i) => ({ f, t: i * 0.08, d: 0.14, type: 'square', v: 0.44 })),
+  qSelect: [{ f: 660, d: 0.09, type: 'triangle', v: 1 }, { f: 990, t: 0.07, d: 0.12, type: 'triangle', v: 0.75 }],
+  qNext: [{ f: 300, to: 700, d: 0.18, type: 'sine', v: 0.5 }],
+  qTick: [{ f: 880, d: 0.05, type: 'square', v: 0.25 }],
+  qTimeout: [{ f: 440, to: 330, d: 0.3, type: 'sine', v: 0.5 }],
+  qCount: [{ f: 520, d: 0.16, type: 'square', v: 0.44 }],
+  qGo: [{ f: 784, d: 0.12, type: 'square', v: 0.44 }, { f: 1175, t: 0.1, d: 0.25, type: 'square', v: 0.44 }],
+  qFinish: [
+    ...[523, 659, 784, 1047].map((f, i) => ({ f, t: i * 0.12, d: 0.25, type: 'square', v: 0.44 })),
+    { f: 1047, t: 0.5, d: 0.6, type: 'triangle', v: 0.75 },
+  ],
 };
 
 let ctx = null;

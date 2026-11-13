@@ -5,6 +5,14 @@
  * Lifecycle (competition.status):
  *   REGISTRATION → LOBBY_LOCKED → COUNTDOWN → MAIN_GAMES → CHALLENGE_WINDOW → FINISHED
  *
+ * Registration: students register themselves (/register) or are added by the
+ * admin. On event day they confirm their presence by scanning the check-in QR
+ * on the big screen. Teams are generated from confirmed participants only.
+ *
+ * Main games (in this order): RoboPath → The Locked Phone → N7 Quiz. They end
+ * when every team is done, when the admin opens the challenge phase, or
+ * automatically `mainGamesMinutes` (default 90) after the start.
+ *
  * Every action returns { ok: true, ... } or { ok: false, error }. The server
  * broadcasts and persists after each successful action.
  */
@@ -14,14 +22,21 @@ import {
 } from './teams.js';
 import * as Robo from './games/robopath.js';
 import * as Locked from './games/lockedPhone.js';
+import * as Quiz from './games/quiz.js';
 import { createHuroof, cleanHuroofSettings } from './games/huroof.js';
+import crypto from 'node:crypto';
 
 export const STATUSES = ['REGISTRATION', 'LOBBY_LOCKED', 'COUNTDOWN', 'MAIN_GAMES', 'CHALLENGE_WINDOW', 'FINISHED'];
-export const GAME_KEYS = ['robopath', 'locked_phone'];
+export const GAME_KEYS = ['robopath', 'locked_phone', 'quiz'];
 export const GAMES = [
   { key: 'robopath', title: 'RoboPath', maxPoints: 100 },
   { key: 'locked_phone', title: 'The Locked Phone', maxPoints: 100 },
+  { key: 'quiz', title: 'N7 Quiz', maxPoints: Quiz.MAX_TOTAL },
 ];
+const QUIZ_INDEX = 2;
+export const CHECKIN_SLOT_MS = 60 * 1000; // the check-in QR changes every minute
+const CHECKIN_SLOTS_VALID = 3; // a scanned code stays valid for 2–3 minutes
+const MAX_PARTICIPANTS = 600;
 export const COUNTDOWN_MS = 3000;
 const FEED_SIZE = 40;
 const NAME_MAX = 24;
@@ -31,6 +46,23 @@ const ok = (extra = {}) => ({ ok: true, ...extra });
 const err = (error, code = 409) => ({ ok: false, error, code });
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const pad2 = (n) => String(n).padStart(2, '0');
+const round1 = (n) => Math.round(n * 10) / 10;
+
+/** Keeps digits and a leading +. Returns '' when it does not look like a phone number. */
+export function cleanPhone(v) {
+  let p = String(v ?? '').trim().replace(/[\s().\-\/]/g, '');
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  if (!/^\+?\d{8,15}$/.test(p)) return '';
+  return p;
+}
+
+/** Same number written two ways (0612… / +212612… / 00212612…) gives the same key. */
+export function phoneKey(v) {
+  let d = String(v ?? '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.startsWith('212') && d.length === 12) d = '0' + d.slice(3);
+  return d;
+}
 
 export function cleanText(v, max) {
   return String(v ?? '')
@@ -44,6 +76,7 @@ const DEFAULT_SETTINGS = {
   responseTimeoutSec: 45, // a challenge left unanswered this long is accepted automatically
   lockedBatteryMinutes: 60,
   challengeMinutes: 12,
+  mainGamesMinutes: 90, // the challenge phase opens by itself this long after the start
   huroof: cleanHuroofSettings({ roundsToWin: 1 }),
 };
 
@@ -53,6 +86,7 @@ function cleanSettings(raw = {}) {
   s.responseTimeoutSec = int(raw.responseTimeoutSec, 15, 300) ?? s.responseTimeoutSec;
   s.lockedBatteryMinutes = int(raw.lockedBatteryMinutes, 20, 240) ?? s.lockedBatteryMinutes;
   s.challengeMinutes = int(raw.challengeMinutes, 1, 120) ?? s.challengeMinutes;
+  s.mainGamesMinutes = int(raw.mainGamesMinutes, 5, 300) ?? s.mainGamesMinutes;
   s.huroof = cleanHuroofSettings({ ...s.huroof, ...(isObj(raw.huroof) ? raw.huroof : {}) });
   return s;
 }
@@ -70,6 +104,9 @@ export function emptySnapshot() {
       maxDenials: 2,
       countdownEndsAt: null,
       startedAt: null,
+      mainGamesEndsAt: null,
+      registrationOpen: true,
+      checkinOpen: false,
       challengeOpenedAt: null,
       challengeTimerEnd: null,
       finishedAt: null,
@@ -92,8 +129,11 @@ export class Competition {
    * @param {string} o.timeZone    event time zone (Locked Phone passcode)
    * @param {string} o.flag        Locked Phone final flag
    */
-  constructor({ snapshot = null, bank = [], timeZone = 'Africa/Casablanca', flag = 'n7sec{3a572180f81e0ea8}', now = Date.now, rand = Math.random } = {}) {
+  constructor({ snapshot = null, bank = [], timeZone = 'Africa/Casablanca', flag = 'n7sec{3a572180f81e0ea8}', now = Date.now, rand = Math.random, secret = crypto.randomBytes(32).toString('hex'), randInt = crypto.randomInt } = {}) {
     this.bank = bank;
+    this.secret = secret;
+    this.randInt = randInt;
+    this.checkinSlot = null;
     this.timeZone = timeZone;
     this.flag = flag;
     this.now = now;
@@ -127,8 +167,32 @@ export class Competition {
     for (const g of this.s.games) {
       if (g.gameKey === 'robopath') g.state = Robo.cleanRoboState(g.state);
       if (g.gameKey === 'locked_phone') g.state = Locked.cleanLockedState(g.state);
+      if (g.gameKey === 'quiz') {
+        g.state = Quiz.cleanQuizState(g.state);
+        g.points = ['completed', 'abandoned'].includes(g.status) ? g.state.score : 0;
+      }
     }
+    this.s.games = this.s.games.filter((g) => GAME_KEYS.includes(g.gameKey));
+    for (const p of this.s.participants) {
+      p.phone = typeof p.phone === 'string' ? p.phone : '';
+      p.source = ['self', 'admin', 'import'].includes(p.source) ? p.source : 'admin';
+      p.checkedInAt = Number.isFinite(p.checkedInAt) ? p.checkedInAt : null;
+    }
+    c.registrationOpen = c.registrationOpen !== false;
+    c.checkinOpen = c.checkinOpen === true;
+    if (c.status === 'MAIN_GAMES' && !c.mainGamesEndsAt && c.startedAt) c.mainGamesEndsAt = c.startedAt + c.settings.mainGamesMinutes * 60000;
+    // a save from before the N7 Quiz existed: index 2 meant "done"
+    const older = new Set(this.s.teams.filter((t) => !this.game(t.id, 'quiz')).map((t) => t.id));
     for (const t of this.s.teams) this.ensureGames(t.id);
+    for (const t of this.s.teams) {
+      if (!older.has(t.id) || t.currentGameIndex < 2) continue;
+      const quiz = this.game(t.id, 'quiz');
+      if (c.status === 'MAIN_GAMES') quiz.status = 'ready';
+      else {
+        quiz.status = 'abandoned';
+        t.currentGameIndex = GAMES.length;
+      }
+    }
     // restore the live Huruf match
     this.huroof = null;
     const active = this.challenge(c.activeChallengeId);
@@ -195,7 +259,7 @@ export class Competition {
           gameKey: key,
           status: 'locked',
           points: 0,
-          state: key === 'robopath' ? Robo.freshRoboState() : Locked.freshLockedState(),
+          state: key === 'robopath' ? Robo.freshRoboState() : key === 'quiz' ? Quiz.freshQuizState() : Locked.freshLockedState(),
           startedAt: null,
           completedAt: null,
         });
@@ -212,7 +276,7 @@ export class Competition {
    * scores & ranking
    * ====================================================================== */
   gamePoints(teamId) {
-    return GAME_KEYS.reduce((sum, key) => sum + (this.game(teamId, key)?.points || 0), 0);
+    return round1(GAME_KEYS.reduce((sum, key) => sum + (this.game(teamId, key)?.points || 0), 0));
   }
 
   adjustmentPoints(teamId) {
@@ -220,7 +284,7 @@ export class Competition {
   }
 
   totalScore(teamId) {
-    return this.gamePoints(teamId) + this.adjustmentPoints(teamId);
+    return round1(this.gamePoints(teamId) + this.adjustmentPoints(teamId));
   }
 
   /** Teams sorted by score; ties: who finished the main games first, then team order. */
@@ -280,6 +344,35 @@ export class Competition {
       }
     }
 
+    if (c.status === 'MAIN_GAMES') {
+      // unanswered quiz questions time out on the server, even if the team left
+      for (const g of this.s.games) {
+        if (g.gameKey !== 'quiz' || g.status !== 'playing') continue;
+        if (Quiz.settle(g.state, now)) {
+          if (Quiz.isDone(g.state)) this.finishQuiz(g);
+          changed = true;
+        }
+      }
+      // time is up for the mini-games: the challenge phase starts by itself
+      if (c.mainGamesEndsAt && now >= c.mainGamesEndsAt) {
+        this.openChallengeWindow({ auto: true });
+        changed = true;
+      }
+    }
+
+    // Huruf: the answering side ran out of time → the question passes to the other side
+    if (this.huroof && this.huroof.game.tick()) changed = true;
+
+    // a new check-in code every minute while check-in is open: screens redraw the QR
+    let redraw = false;
+    if (c.status === 'REGISTRATION' && c.checkinOpen) {
+      const slot = Math.floor(now / CHECKIN_SLOT_MS);
+      if (this.checkinSlot !== slot) {
+        redraw = this.checkinSlot !== null;
+        this.checkinSlot = slot;
+      }
+    }
+
     if (c.status === 'CHALLENGE_WINDOW') {
       const windowOpen = this.windowOpen();
       for (const ch of this.s.challenges) {
@@ -301,7 +394,7 @@ export class Competition {
       }
     }
     if (changed) this.bump();
-    return changed;
+    return changed || redraw;
   }
 
   windowOpen() {
@@ -316,18 +409,144 @@ export class Competition {
     return list.includes(this.comp.status) ? null : err(`Not possible now (status: ${this.comp.status})`);
   }
 
-  addParticipant({ fullName, filiere, year }) {
-    const bad = this.requireStatus('REGISTRATION');
-    if (bad) return err('Participants can only be added during registration. Go back to registration first.');
+  findByPhone(phone) {
+    const key = phoneKey(phone);
+    return key ? this.s.participants.find((p) => p.phone && phoneKey(p.phone) === key) || null : null;
+  }
+
+  /** Validates the registration form. Returns { value } or { error }. */
+  readPerson({ fullName, phone, filiere, year }, { phoneRequired, exceptId = null }) {
     const name = cleanText(fullName, 80);
     const y = parseYear(year);
-    if (!name) return err('Full name is required', 400);
-    if (!y) return err('Academic year must be 1, 2 or 3', 400);
-    if (this.s.participants.length >= 600) return err('Too many participants (600 max)', 400);
-    const p = { id: this.nextId('participant', 'p'), fullName: name, filiere: cleanText(filiere, 80), year: y, teamId: null, createdAt: this.now() };
+    const rawPhone = cleanText(phone, 30);
+    const tel = cleanPhone(rawPhone);
+    const field = cleanText(filiere, 80);
+    if (name.length < 2) return { error: err('Full name is required', 400) };
+    if (phoneRequired && (name.length < 3 || !/\s/.test(name))) return { error: err('Enter your first and last name', 400) };
+    if (phoneRequired && !rawPhone) return { error: err('Phone number is required', 400) };
+    if (rawPhone && !tel) return { error: err('This phone number does not look right', 400) };
+    if (phoneRequired && !field) return { error: err('Field is required', 400) };
+    if (!y) return { error: err('Year must be 1, 2 or 3', 400) };
+    if (tel) {
+      const other = this.findByPhone(tel);
+      if (other && other.id !== exceptId) return { error: err('This phone number is already registered', 409) };
+    }
+    return { value: { fullName: name, phone: tel, filiere: field, year: y } };
+  }
+
+  newParticipant(v, source, checkedIn) {
+    const now = this.now();
+    const p = { id: this.nextId('participant', 'p'), fullName: v.fullName, phone: v.phone || '', filiere: v.filiere, year: v.year, teamId: null, source, checkedInAt: checkedIn ? now : null, createdAt: now };
     this.s.participants.push(p);
+    return p;
+  }
+
+  /** Admin adds someone at the desk: they are there, so they are confirmed. */
+  addParticipant(body) {
+    const bad = this.requireStatus('REGISTRATION');
+    if (bad) return err('Participants can only be added during registration. Go back to registration first.');
+    if (this.s.participants.length >= MAX_PARTICIPANTS) return err(`Too many participants (${MAX_PARTICIPANTS} max)`, 400);
+    const { value, error } = this.readPerson(body, { phoneRequired: false });
+    if (error) return error;
+    const p = this.newParticipant(value, 'admin', body.present !== false);
     this.bump();
     return ok({ participant: p });
+  }
+
+  /** Public registration form. With a valid check-in code the person is confirmed at once. */
+  register(body) {
+    const c = this.comp;
+    if (c.status !== 'REGISTRATION') return err('Registration is closed: the teams are already formed', 409);
+    const onSite = body.checkinKey ? this.checkinKeyValid(body.checkinKey) : false;
+    if (body.checkinKey && !onSite) return err('This check-in code has expired. Scan the QR code on the screen again.', 410);
+    if (!c.registrationOpen && !onSite) return err('Registration is closed', 409);
+    if (this.s.participants.length >= MAX_PARTICIPANTS) return err('Registration is full', 409);
+    const { value, error } = this.readPerson(body, { phoneRequired: true });
+    if (error) return error;
+    const p = this.newParticipant(value, 'self', onSite && c.checkinOpen);
+    this.log('register', `${p.fullName} registered${p.checkedInAt ? ' and checked in' : ''}`);
+    this.bump();
+    return ok({ participantId: p.id, proof: this.regProof(p.id), fullName: p.fullName, checkedIn: !!p.checkedInAt });
+  }
+
+  /** Kept on the student's phone after registering, so check-in is one tap. */
+  regProof(id) {
+    return crypto.createHmac('sha256', this.secret).update(`reg|${id}`).digest('base64url').slice(0, 22);
+  }
+
+  checkinKey(slot = Math.floor(this.now() / CHECKIN_SLOT_MS)) {
+    const mac = crypto.createHmac('sha256', this.secret).update(`checkin|${slot}`).digest();
+    return mac.toString('base64url').replace(/[-_]/g, '').slice(0, 10);
+  }
+
+  checkinKeyValid(key) {
+    if (typeof key !== 'string' || key.length !== 10) return false;
+    const slot = Math.floor(this.now() / CHECKIN_SLOT_MS);
+    const given = Buffer.from(key);
+    let found = false;
+    for (let i = 0; i < CHECKIN_SLOTS_VALID; i++) {
+      const want = Buffer.from(this.checkinKey(slot - i));
+      if (want.length === given.length && crypto.timingSafeEqual(want, given)) found = true;
+    }
+    return found;
+  }
+
+  /**
+   * A registered person scans the QR on the big screen.
+   * Identified by the participant id kept on their phone at registration, or by phone number.
+   */
+  checkIn({ key, participantId, proof, phone }) {
+    const c = this.comp;
+    if (c.status !== 'REGISTRATION') return err('Check-in is closed: the teams are already formed', 409);
+    if (!c.checkinOpen) return err('Check-in is not open yet. Wait for the organisers.', 409);
+    if (!this.checkinKeyValid(key)) return err('This check-in code has expired. Scan the QR code on the screen again.', 410);
+    let p = null;
+    if (typeof participantId === 'string' && typeof proof === 'string' && proof.length === 22) {
+      const want = Buffer.from(this.regProof(participantId));
+      const given = Buffer.from(proof);
+      if (want.length === given.length && crypto.timingSafeEqual(want, given)) p = this.s.participants.find((x) => x.id === participantId) || null;
+    }
+    if (!p && phone) p = this.findByPhone(phone);
+    if (!p) return err('We could not find your registration', 404);
+    const first = !p.checkedInAt;
+    if (first) {
+      p.checkedInAt = this.now();
+      this.log('checkin', `${p.fullName} checked in`);
+      this.bump();
+    }
+    return ok({ participantId: p.id, proof: this.regProof(p.id), fullName: p.fullName, already: !first, quiet: !first });
+  }
+
+  setPresence({ id, present }) {
+    const bad = this.requireStatus('REGISTRATION');
+    if (bad) return err('Presence can only change during registration', 409);
+    const p = this.s.participants.find((x) => x.id === id);
+    if (!p) return err('Unknown participant', 404);
+    p.checkedInAt = present ? p.checkedInAt || this.now() : null;
+    this.bump();
+    return ok();
+  }
+
+  markAllPresent({ present = true } = {}) {
+    const bad = this.requireStatus('REGISTRATION');
+    if (bad) return err('Presence can only change during registration', 409);
+    const now = this.now();
+    for (const p of this.s.participants) p.checkedInAt = present ? p.checkedInAt || now : null;
+    this.bump();
+    return ok();
+  }
+
+  setRegistration({ registrationOpen, checkinOpen }) {
+    const c = this.comp;
+    if (typeof registrationOpen === 'boolean') c.registrationOpen = registrationOpen;
+    if (typeof checkinOpen === 'boolean') {
+      if (checkinOpen && c.status !== 'REGISTRATION') return err('Check-in happens before the teams are generated', 409);
+      if (checkinOpen && !c.checkinOpen) this.log('phase', 'Check-in is open: scan the QR code on the big screen.');
+      c.checkinOpen = checkinOpen;
+      this.checkinSlot = null;
+    }
+    this.bump();
+    return ok();
   }
 
   importParticipants({ text }) {
@@ -338,22 +557,21 @@ export class Competition {
     if (!rows.length) return err(errors[0] || 'No participant found in the text', 400);
     if (this.s.participants.length + rows.length > 600) return err('Too many participants (600 max)', 400);
     for (const r of rows) {
-      this.s.participants.push({ id: this.nextId('participant', 'p'), fullName: cleanText(r.fullName, 80), filiere: cleanText(r.filiere, 80), year: r.year, teamId: null, createdAt: this.now() });
+      this.s.participants.push({ id: this.nextId('participant', 'p'), fullName: cleanText(r.fullName, 80), phone: cleanPhone(r.phone), filiere: cleanText(r.filiere, 80), year: r.year, teamId: null, source: 'import', checkedInAt: null, createdAt: this.now() });
     }
     this.bump();
     return ok({ added: rows.length, errors });
   }
 
-  updateParticipant({ id, fullName, filiere, year }) {
-    const p = this.s.participants.find((x) => x.id === id);
+  updateParticipant(body) {
+    const p = this.s.participants.find((x) => x.id === body.id);
     if (!p) return err('Unknown participant', 404);
-    const name = cleanText(fullName, 80);
-    const y = parseYear(year);
-    if (!name) return err('Full name is required', 400);
-    if (!y) return err('Academic year must be 1, 2 or 3', 400);
-    p.fullName = name;
-    p.filiere = cleanText(filiere, 80);
-    p.year = y;
+    const { value, error } = this.readPerson({ phone: p.phone, ...body }, { phoneRequired: false, exceptId: p.id });
+    if (error) return error;
+    p.fullName = value.fullName;
+    p.phone = value.phone;
+    p.filiere = value.filiere;
+    p.year = value.year;
     this.bump();
     return ok();
   }
@@ -379,8 +597,9 @@ export class Competition {
   generateTeams() {
     const bad = this.requireStatus('REGISTRATION', 'LOBBY_LOCKED');
     if (bad) return bad;
-    const people = this.s.participants;
-    if (people.length < 1) return err('Register participants first', 400);
+    const people = this.s.participants.filter((p) => p.checkedInAt);
+    if (!this.s.participants.length) return err('Register participants first', 400);
+    if (people.length < 1) return err('Nobody has confirmed their presence yet: open check-in or mark people present', 400);
     const plan = distribute(people.map((p) => ({ id: p.id, year: p.year })));
     if (plan.length > 144) return err('At most 144 teams are supported', 400);
     const names = makeNames(plan.length);
@@ -399,7 +618,7 @@ export class Competition {
       mainFinishedAt: null,
       createdAt: now,
     }));
-    for (const p of people) p.teamId = null;
+    for (const p of this.s.participants) p.teamId = null;
     plan.forEach((t, i) => {
       for (const pid of t.memberIds) {
         const p = people.find((x) => x.id === pid);
@@ -411,8 +630,9 @@ export class Competition {
     this.s.adjustments = [];
     for (const t of this.s.teams) this.ensureGames(t.id);
     this.comp.status = 'LOBBY_LOCKED';
+    this.comp.checkinOpen = false;
     this.feed = [];
-    this.log('phase', `${this.s.teams.length} teams generated. Teams: log in with your join code!`);
+    this.log('phase', `${this.s.teams.length} teams generated from ${people.length} confirmed players. Teams: log in with your join code!`);
     this.bump();
     return ok({ teams: this.s.teams.length });
   }
@@ -483,6 +703,7 @@ export class Competition {
     const now = this.now();
     c.status = 'MAIN_GAMES';
     c.startedAt = now;
+    c.mainGamesEndsAt = now + c.settings.mainGamesMinutes * 60000;
     c.countdownEndsAt = null;
     for (const t of this.s.teams) {
       t.currentGameIndex = 0;
@@ -493,21 +714,39 @@ export class Competition {
     this.log('phase', 'GO! The mini-game gauntlet has started.');
   }
 
-  openChallengeWindow({ minutes } = {}) {
+  openChallengeWindow({ minutes, auto = false } = {}) {
     const bad = this.requireStatus('MAIN_GAMES');
     if (bad) return bad;
     const c = this.comp;
     const mins = Number.isFinite(minutes) ? Math.round(minutes) : c.settings.challengeMinutes;
+    if (auto) this.log('phase', 'Time is up for the mini-games!');
     if (mins < 1 || mins > 120) return err('The challenge window lasts 1 to 120 minutes', 400);
     const now = this.now();
     this.freezeMainGames(now);
     c.status = 'CHALLENGE_WINDOW';
     c.challengeOpenedAt = now;
     c.challengeTimerEnd = now + mins * 60 * 1000;
+    c.mainGamesEndsAt = Math.min(c.mainGamesEndsAt || now, now);
     c.settings.challengeMinutes = mins;
     delete c.windowClosedLogged;
     for (const t of this.s.teams) t.denialsRemaining = c.maxDenials;
     this.log('phase', `The challenge window is open for ${mins} minutes! Lower-ranked teams can challenge teams above them.`);
+    this.bump();
+    return ok();
+  }
+
+  /** Moves the automatic end of the mini-games (MAIN_GAMES only). */
+  extendMainGames({ minutes }) {
+    const bad = this.requireStatus('MAIN_GAMES');
+    if (bad) return bad;
+    const m = Math.round(Number(minutes));
+    if (!Number.isFinite(m) || m === 0 || Math.abs(m) > 120) return err('Add between -120 and 120 minutes', 400);
+    const c = this.comp;
+    const now = this.now();
+    const before = c.mainGamesEndsAt || now;
+    c.mainGamesEndsAt = Math.max(now + 60000, before + m * 60000);
+    const left = Math.round((c.mainGamesEndsAt - now) / 60000);
+    this.log('phase', `${m > 0 ? 'More time' : 'Less time'} for the mini-games: about ${left} min left.`);
     this.bump();
     return ok();
   }
@@ -555,6 +794,10 @@ export class Competition {
           Locked.closeGame(g.state, now);
           g.points = Locked.lockedPoints(g.state, now);
         }
+        if (key === 'quiz' && g.state.deck) {
+          Quiz.closeQuiz(g.state, now);
+          g.points = g.state.score;
+        }
         g.status = 'abandoned';
         g.completedAt = now;
       }
@@ -567,6 +810,7 @@ export class Competition {
 
   resetCompetition({ keepParticipants = true } = {}) {
     const keep = keepParticipants !== false ? this.s.participants.map((p) => ({ ...p, teamId: null })) : [];
+    const regOpen = this.comp.registrationOpen;
     const counters = this.s.counters;
     const version = this.s.version;
     const settings = this.comp.settings;
@@ -579,6 +823,7 @@ export class Competition {
     this.comp.settings = settings;
     this.comp.baseChallengeStake = stake;
     this.comp.maxDenials = denials;
+    this.comp.registrationOpen = regOpen;
     this.huroof = null;
     this.feed = [];
     return ok();
@@ -820,14 +1065,66 @@ export class Competition {
     g.completedAt = now;
     const team = this.team(g.teamId);
     if (team && team.currentGameIndex === 1) {
-      team.currentGameIndex = 2;
-      team.mainFinishedAt = now;
+      team.currentGameIndex = QUIZ_INDEX;
+      const quiz = this.game(team.id, 'quiz');
+      if (quiz.status === 'locked') quiz.status = 'ready';
     }
     const name = this.teamName(g.teamId);
     if (reason === 'found') this.log('game', `${name} cracked the Locked Phone! (${g.points} pts)`, [g.teamId]);
     else if (reason === 'finished') this.log('game', `${name} finished the Locked Phone (${g.points} pts)`, [g.teamId]);
     else if (reason === 'dead') this.log('game', `${name}'s phone died (${g.points} pts)`, [g.teamId]);
     else this.log('game', `${name} stopped the Locked Phone (${g.points} pts)`, [g.teamId]);
+  }
+
+  /* ---------------- N7 Quiz ---------------- */
+  quizStart(teamId) {
+    const { team, error } = this.requirePlaying(teamId, QUIZ_INDEX);
+    if (error) return error;
+    const g = this.game(team.id, 'quiz');
+    if (g.status !== 'ready') return err('The quiz has already started');
+    const res = Quiz.startQuiz(g.state, this.now(), this.randInt);
+    if (!res.ok) return err(res.error);
+    g.status = 'playing';
+    g.startedAt = this.now();
+    g.points = 0;
+    this.log('game', `${team.customName} started the N7 Quiz`, [team.id]);
+    this.bump();
+    return ok({ quiz: Quiz.quizView(g.state, g.status) });
+  }
+
+  quizAnswer(teamId, { qid, choice, tabSwitches }) {
+    const { team, error } = this.requirePlaying(teamId, QUIZ_INDEX);
+    if (error) return error;
+    const g = this.game(team.id, 'quiz');
+    if (g.status !== 'playing') return err('The quiz is not running');
+    const res = Quiz.answer(g.state, { qid, choice: choice === undefined ? null : choice, tabSwitches }, this.now());
+    if (!res.ok) return err(res.error, 400);
+    if (Quiz.isDone(g.state)) this.finishQuiz(g);
+    this.bump();
+    return ok({ quiz: Quiz.quizView(g.state, g.status) });
+  }
+
+  /** Tab switches are reported even between answers (anti-cheat, shown to the admin). */
+  quizReport(teamId, { tabSwitches }) {
+    const t = this.team(teamId);
+    const g = t && this.game(t.id, 'quiz');
+    if (!g || g.status !== 'playing') return ok({ quiet: true });
+    const sw = Math.floor(Number(tabSwitches));
+    if (Number.isFinite(sw) && sw > g.state.switches) g.state.switches = Math.min(sw, 999);
+    return ok({ quiet: true });
+  }
+
+  finishQuiz(g) {
+    const now = this.now();
+    g.status = 'completed';
+    g.completedAt = now;
+    g.points = g.state.score;
+    const team = this.team(g.teamId);
+    if (team && team.currentGameIndex === QUIZ_INDEX) {
+      team.currentGameIndex = GAMES.length;
+      team.mainFinishedAt = now;
+    }
+    this.log('game', `${this.teamName(g.teamId)} finished the N7 Quiz (${g.points} pts)`, [g.teamId]);
     if (team && this.s.teams.every((t) => t.currentGameIndex >= GAMES.length)) {
       this.log('phase', 'Every team has finished the mini-games.');
     }
@@ -1074,6 +1371,7 @@ export class Competition {
   teamSummary(t, ranks, { codes = false, members = true } = {}) {
     const robo = this.game(t.id, 'robopath');
     const locked = this.game(t.id, 'locked_phone');
+    const quiz = this.game(t.id, 'quiz');
     const busy = this.busyChallenge(t.id);
     return {
       id: t.id,
@@ -1094,6 +1392,7 @@ export class Competition {
       games: {
         robopath: { status: robo.status, points: robo.points, solved: robo.state.solved.filter(Boolean).length, skipped: robo.state.skipped.filter(Boolean).length, total: Robo.LEVEL_COUNT },
         locked_phone: { status: locked.status, points: locked.points, stage: locked.state.stage, skipped: locked.state.skipped.filter(Boolean).length, total: 4 },
+        quiz: { status: quiz.status, points: quiz.points, ...Quiz.quizProgress(quiz.state) },
       },
     };
   }
@@ -1125,6 +1424,8 @@ export class Competition {
       status: c.status,
       countdownEndsAt: c.countdownEndsAt,
       startedAt: c.startedAt,
+      mainGamesEndsAt: c.mainGamesEndsAt,
+      mainGamesMinutes: c.settings.mainGamesMinutes,
       challengeOpenedAt: c.challengeOpenedAt,
       challengeTimerEnd: c.challengeTimerEnd,
       windowOpen: this.windowOpen(),
@@ -1184,7 +1485,12 @@ export class Competition {
       teamCount: this.s.teams.length,
       claimedCount: this.s.teams.filter((t) => t.claimedAt).length,
       participantCount: this.s.participants.length,
+      confirmedCount: this.s.participants.filter((p) => p.checkedInAt).length,
+      registrationOpen: c.status === 'REGISTRATION' && c.registrationOpen,
+      checkinOpen: c.status === 'REGISTRATION' && c.checkinOpen,
+      fields: this.fieldSuggestions(),
       countdownEndsAt: c.countdownEndsAt,
+      mainGamesEndsAt: c.mainGamesEndsAt,
       challengeTimerEnd: c.challengeTimerEnd,
       windowOpen: this.windowOpen(),
       baseChallengeStake: c.baseChallengeStake,
@@ -1196,12 +1502,39 @@ export class Competition {
     };
   }
 
+  fieldSuggestions() {
+    const count = new Map();
+    for (const p of this.s.participants) {
+      const f = (p.filiere || '').trim();
+      if (f) count.set(f, (count.get(f) || 0) + 1);
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([f]) => f);
+  }
+
+  /** Registration / check-in figures for the big screen (no phone numbers). */
+  registrationView({ withKey }) {
+    const c = this.comp;
+    const people = this.s.participants;
+    const confirmed = people.filter((p) => p.checkedInAt).sort((a, b) => b.checkedInAt - a.checkedInAt);
+    const open = c.status === 'REGISTRATION' && c.checkinOpen;
+    return {
+      registrationOpen: c.status === 'REGISTRATION' && c.registrationOpen,
+      checkinOpen: open,
+      registered: people.length,
+      confirmed: confirmed.length,
+      recent: confirmed.slice(0, 18).map((p) => ({ id: p.id, name: p.fullName, filiere: p.filiere, year: p.year })),
+      checkinKey: withKey && open ? this.checkinKey() : null,
+      slotMs: CHECKIN_SLOT_MS,
+    };
+  }
+
   /** The big screen. Join codes are shown only before the competition starts. */
   hostView() {
     const b = this.baseView();
     const showCodes = ['REGISTRATION', 'LOBBY_LOCKED'].includes(this.comp.status);
     return {
       role: 'host',
+      registration: this.registrationView({ withKey: true }),
       now: b.now,
       version: b.version,
       competition: b.competition,
@@ -1222,7 +1555,8 @@ export class Competition {
       role: 'admin',
       now: b.now,
       version: b.version,
-      competition: { ...b.competition, settings: this.comp.settings },
+      competition: { ...b.competition, settings: this.comp.settings, registrationOpen: this.comp.registrationOpen, checkinOpen: this.comp.checkinOpen },
+      registration: this.registrationView({ withKey: true }),
       participants: this.s.participants,
       teams: this.s.teams.map((t) => this.teamSummary(t, b.ranks, { codes: true })),
       leaderboard: b.leaderboard,
@@ -1241,6 +1575,7 @@ export class Competition {
     const now = this.now();
     const robo = this.game(t.id, 'robopath');
     const locked = this.game(t.id, 'locked_phone');
+    const quiz = this.game(t.id, 'quiz');
     const mine = (c) => c.challengerTeamId === t.id || c.defenderTeamId === t.id;
     const queue = this.queueView();
     return {
@@ -1253,6 +1588,7 @@ export class Competition {
       leaderboard: b.leaderboard,
       robopath: { status: robo.status, points: robo.points, solved: robo.state.solved, skipped: robo.state.skipped, programs: robo.state.programs, levelPoints: Robo.LEVEL_POINTS },
       lockedPhone: { status: locked.status, points: locked.points, ...Locked.lockedView(locked.state, now, this.timeZone, this.flag) },
+      quiz: { status: quiz.status, points: ['completed', 'abandoned'].includes(quiz.status) ? quiz.points : null, ...Quiz.quizView(quiz.state, quiz.status) },
       challenge: {
         targets: t.currentGameIndex >= 0 ? this.challengeTargets(t.id) : [],
         incoming: this.s.challenges.filter((c) => c.status === 'PENDING' && c.defenderTeamId === t.id).map((c) => this.challengeSummary(c)),

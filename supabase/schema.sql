@@ -53,6 +53,9 @@ create table if not exists public.competition (
   max_denials            smallint    not null default 2  check (max_denials between 0 and 10),
   countdown_ends_at      timestamptz,
   started_at             timestamptz,
+  main_games_ends_at     timestamptz,                        -- the challenge phase opens by itself at this time
+  registration_open      boolean     not null default true,  -- the public /register form accepts students
+  checkin_open           boolean     not null default false, -- the check-in QR is on the big screen
   challenge_opened_at    timestamptz,
   challenge_timer_end    timestamptz,
   finished_at            timestamptz,
@@ -71,7 +74,7 @@ create table if not exists public.teams (
   custom_name         text not null,                         -- name chosen by the team
   color_hex           text not null check (color_hex ~ '^#[0-9A-Fa-f]{6}$'),
   sort_order          smallint not null default 0,
-  current_game_index  smallint not null default 0,           -- 0 RoboPath, 1 Locked Phone, 2 done
+  current_game_index  smallint not null default 0,           -- 0 RoboPath, 1 Locked Phone, 2 N7 Quiz, 3 done
   denials_remaining   smallint not null default 2,
   claimed_at          timestamptz,                           -- first login with the join code
   main_finished_at    timestamptz,                           -- finished the gauntlet
@@ -83,20 +86,24 @@ create table if not exists public.teams (
 create table if not exists public.participants (
   id             text primary key,
   full_name      text not null check (char_length(full_name) between 1 and 80),
-  filiere        text not null default '' check (char_length(filiere) <= 80),
+  phone          text not null default '' check (char_length(phone) <= 20),   -- visible to the admin only
+  filiere        text not null default '' check (char_length(filiere) <= 80),  -- field of study
   academic_year  smallint not null check (academic_year in (1, 2, 3)),
+  source         text not null default 'admin' check (source in ('self','admin','import')), -- who registered them
+  checked_in_at  timestamptz,                                -- confirmed presence (QR scan or admin); teams use only these
   team_id        text references public.teams (id) on delete set null,
   created_at     timestamptz not null default now()
 );
 create index if not exists participants_team_idx on public.participants (team_id);
 
--- per team, per mini-game progress and normalised points (0–100 per game)
+-- per team, per mini-game progress and points
+-- (RoboPath 0–100, Locked Phone 0–100, N7 Quiz 0–280 with one decimal, as in the original quiz)
 create table if not exists public.game_progress (
   team_id       text not null references public.teams (id) on delete cascade,
-  game_key      text not null check (game_key in ('robopath','locked_phone')),
+  game_key      text not null check (game_key in ('robopath','locked_phone','quiz')),
   status        text not null default 'locked'
                 check (status in ('locked','ready','playing','completed','abandoned','dead')),
-  points        integer not null default 0 check (points between 0 and 100),
+  points        numeric(6,1) not null default 0 check (points between 0 and 1000),
   state         jsonb not null default '{}'::jsonb,           -- game-specific saved state
   started_at    timestamptz,
   completed_at  timestamptz,
@@ -150,6 +157,28 @@ create table if not exists public.event_log (
 );
 create index if not exists event_log_created_idx on public.event_log (created_at desc);
 
+-- ---------------------------------------------------------------------------
+-- 1b. Upgrade a database created by an earlier version of this file
+--     (adds the registration / check-in columns and the N7 Quiz; keeps data)
+-- ---------------------------------------------------------------------------
+alter table public.competition  add column if not exists main_games_ends_at timestamptz;
+alter table public.competition  add column if not exists registration_open  boolean not null default true;
+alter table public.competition  add column if not exists checkin_open       boolean not null default false;
+alter table public.participants add column if not exists phone              text not null default '';
+alter table public.participants add column if not exists source             text not null default 'admin';
+alter table public.participants add column if not exists checked_in_at      timestamptz;
+alter table public.participants drop constraint if exists participants_phone_check;
+alter table public.participants add  constraint participants_phone_check check (char_length(phone) <= 20);
+alter table public.participants drop constraint if exists participants_source_check;
+alter table public.participants add  constraint participants_source_check check (source in ('self','admin','import'));
+
+drop view if exists public.v_leaderboard; -- depends on game_progress.points
+alter table public.game_progress drop constraint if exists game_progress_game_key_check;
+alter table public.game_progress drop constraint if exists game_progress_points_check;
+alter table public.game_progress alter column points type numeric(6,1);
+alter table public.game_progress add  constraint game_progress_game_key_check check (game_key in ('robopath','locked_phone','quiz'));
+alter table public.game_progress add  constraint game_progress_points_check   check (points between 0 and 1000);
+
 -- Readable leaderboard for the Supabase dashboard (not reachable by anon)
 create or replace view public.v_leaderboard with (security_invoker = true) as
 select t.id,
@@ -159,7 +188,7 @@ select t.id,
        coalesce(a.points, 0)                           as adjustment_points,
        coalesce(g.points, 0) + coalesce(a.points, 0)   as total_score
 from public.teams t
-left join (select team_id, sum(points)::int as points from public.game_progress group by team_id) g
+left join (select team_id, sum(points) as points from public.game_progress group by team_id) g
        on g.team_id = t.id
 left join (select team_id, sum(points)::int as points from public.score_adjustments group by team_id) a
        on a.team_id = t.id
@@ -252,7 +281,8 @@ begin
 
   -- competition -------------------------------------------------------------
   insert into public.competition as k (id, version, status, min_members, max_members, balance_small_groups,
-         base_challenge_stake, max_denials, countdown_ends_at, started_at, challenge_opened_at,
+         base_challenge_stake, max_denials, countdown_ends_at, started_at, main_games_ends_at,
+         registration_open, checkin_open, challenge_opened_at,
          challenge_timer_end, finished_at, active_challenge_id, settings, counters, updated_at)
   values (1, v_version,
           coalesce(c->>'status', 'REGISTRATION'),
@@ -261,7 +291,10 @@ begin
           coalesce((c->>'balanceSmallGroups')::boolean, true),
           coalesce((c->>'baseChallengeStake')::int, 50),
           coalesce((c->>'maxDenials')::smallint, 2),
-          ts(c->'countdownEndsAt'), ts(c->'startedAt'), ts(c->'challengeOpenedAt'),
+          ts(c->'countdownEndsAt'), ts(c->'startedAt'), ts(c->'mainGamesEndsAt'),
+          coalesce((c->>'registrationOpen')::boolean, true),
+          coalesce((c->>'checkinOpen')::boolean, false),
+          ts(c->'challengeOpenedAt'),
           ts(c->'challengeTimerEnd'), ts(c->'finishedAt'),
           c->>'activeChallengeId',
           coalesce(c->'settings', '{}'::jsonb),
@@ -272,6 +305,8 @@ begin
     max_members = excluded.max_members, balance_small_groups = excluded.balance_small_groups,
     base_challenge_stake = excluded.base_challenge_stake, max_denials = excluded.max_denials,
     countdown_ends_at = excluded.countdown_ends_at, started_at = excluded.started_at,
+    main_games_ends_at = excluded.main_games_ends_at, registration_open = excluded.registration_open,
+    checkin_open = excluded.checkin_open,
     challenge_opened_at = excluded.challenge_opened_at, challenge_timer_end = excluded.challenge_timer_end,
     finished_at = excluded.finished_at, active_challenge_id = excluded.active_challenge_id,
     settings = excluded.settings, counters = excluded.counters, updated_at = now();
@@ -304,18 +339,21 @@ begin
   delete from public.participants
    where id not in (select x->>'id' from jsonb_array_elements(coalesce(p_snapshot->'participants','[]')) x);
 
-  insert into public.participants as p (id, full_name, filiere, academic_year, team_id, created_at)
-  select x->>'id', x->>'fullName', coalesce(x->>'filiere',''), (x->>'year')::smallint,
-         nullif(x->>'teamId',''), coalesce(ts(x->'createdAt'), now())
+  insert into public.participants as p (id, full_name, phone, filiere, academic_year, source,
+         checked_in_at, team_id, created_at)
+  select x->>'id', x->>'fullName', coalesce(x->>'phone',''), coalesce(x->>'filiere',''),
+         (x->>'year')::smallint, coalesce(nullif(x->>'source',''), 'admin'),
+         ts(x->'checkedInAt'), nullif(x->>'teamId',''), coalesce(ts(x->'createdAt'), now())
     from jsonb_array_elements(coalesce(p_snapshot->'participants','[]')) x
   on conflict (id) do update set
-    full_name = excluded.full_name, filiere = excluded.filiere, academic_year = excluded.academic_year,
-    team_id = excluded.team_id, created_at = excluded.created_at;
+    full_name = excluded.full_name, phone = excluded.phone, filiere = excluded.filiere,
+    academic_year = excluded.academic_year, source = excluded.source,
+    checked_in_at = excluded.checked_in_at, team_id = excluded.team_id, created_at = excluded.created_at;
 
   -- game progress -----------------------------------------------------------
   delete from public.game_progress where true;
   insert into public.game_progress (team_id, game_key, status, points, state, started_at, completed_at, updated_at)
-  select x->>'teamId', x->>'gameKey', x->>'status', coalesce((x->>'points')::int, 0),
+  select x->>'teamId', x->>'gameKey', x->>'status', coalesce((x->>'points')::numeric, 0),
          coalesce(x->'state','{}'::jsonb), ts(x->'startedAt'), ts(x->'completedAt'), now()
     from jsonb_array_elements(coalesce(p_snapshot->'games','[]')) x;
 
@@ -383,7 +421,9 @@ begin
       'status', k.status, 'minMembers', k.min_members, 'maxMembers', k.max_members,
       'balanceSmallGroups', k.balance_small_groups, 'baseChallengeStake', k.base_challenge_stake,
       'maxDenials', k.max_denials, 'countdownEndsAt', ms(k.countdown_ends_at),
-      'startedAt', ms(k.started_at), 'challengeOpenedAt', ms(k.challenge_opened_at),
+      'startedAt', ms(k.started_at), 'mainGamesEndsAt', ms(k.main_games_ends_at),
+      'registrationOpen', k.registration_open, 'checkinOpen', k.checkin_open,
+      'challengeOpenedAt', ms(k.challenge_opened_at),
       'challengeTimerEnd', ms(k.challenge_timer_end), 'finishedAt', ms(k.finished_at),
       'activeChallengeId', k.active_challenge_id, 'settings', k.settings),
     'teams', coalesce((select jsonb_agg(jsonb_build_object(
@@ -393,7 +433,8 @@ begin
         'claimedAt', ms(t.claimed_at), 'mainFinishedAt', ms(t.main_finished_at),
         'createdAt', ms(t.created_at)) order by t.sort_order, t.id) from public.teams t), '[]'::jsonb),
     'participants', coalesce((select jsonb_agg(jsonb_build_object(
-        'id', p.id, 'fullName', p.full_name, 'filiere', p.filiere, 'year', p.academic_year,
+        'id', p.id, 'fullName', p.full_name, 'phone', p.phone, 'filiere', p.filiere,
+        'year', p.academic_year, 'source', p.source, 'checkedInAt', ms(p.checked_in_at),
         'teamId', p.team_id, 'createdAt', ms(p.created_at)) order by p.created_at, p.id)
         from public.participants p), '[]'::jsonb),
     'games', coalesce((select jsonb_agg(jsonb_build_object(

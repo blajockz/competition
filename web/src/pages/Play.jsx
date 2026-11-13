@@ -12,8 +12,10 @@ import {
 import Leaderboard from '../components/Leaderboard.jsx';
 import RoboPath from '../games/robopath/RoboPath.jsx';
 import LockedPhone from '../games/locked/LockedPhone.jsx';
+import Quiz from '../games/quiz/Quiz.jsx';
 import HuroofBoard from '../games/huroof/HuroofBoard.jsx';
-import { AnswerClock, phaseText, RoundScore, useMatchSounds } from '../games/huroof/MatchParts.jsx';
+import { HfBuzzer } from '../games/huroof/Original.jsx';
+import { phaseText } from '../games/huroof/MatchParts.jsx';
 import './play.css';
 
 /* ------------------------------------------------------------------ */
@@ -35,7 +37,7 @@ export default function Play() {
         subtitle="Enter the 4-character code shown on the big screen next to your team’s name, or scan your team’s QR code."
         label="Team join code"
         stageTitle="Your team is waiting."
-        stageText="This device becomes your team’s game screen for the whole evening: RoboPath, the Locked Phone and the Huruf showdown."
+        stageText="This device becomes your team’s game screen for the whole evening: RoboPath, the Locked Phone, the N7 Quiz and the Huruf showdown."
         placeholder="A7X9"
         maxLength={8}
         busy={busy}
@@ -105,6 +107,7 @@ function TeamApp({ token, onLogout }) {
   const team = { id: me.id, name: me.name, colorHex: me.colorHex };
   const rp = state.robopath;
   const lp = state.lockedPhone;
+  const qz = state.quiz;
   const inMatch = state.match && state.match.side !== null;
   const gameStatuses = ['MAIN_GAMES', 'CHALLENGE_WINDOW', 'FINISHED'];
 
@@ -119,8 +122,10 @@ function TeamApp({ token, onLogout }) {
     screen = <RoboPath key={`rp-${state.competition.startedAt}`} data={rp} act={act} team={team} onContinue={() => ack('robopath')} />;
   } else if (gameStatuses.includes(status) && (['ready', 'playing'].includes(lp.status) || (!acks.locked && lp.startedAt > 0 && ['completed', 'dead', 'abandoned'].includes(lp.status) && status !== 'FINISHED'))) {
     screen = <LockedPhone key={`lp-${state.competition.startedAt}`} data={{ ...lp, status: lp.status }} act={act} team={team} serverNow={now} onContinue={() => ack('locked')} />;
+  } else if (gameStatuses.includes(status) && qz && (['ready', 'playing'].includes(qz.status) || (!acks.quiz && qz.phase === 'done' && ['completed', 'abandoned'].includes(qz.status) && status !== 'FINISHED'))) {
+    screen = <Quiz key={`qz-${state.competition.startedAt}`} data={qz} act={act} team={team} offset={state.offset} onContinue={qz.phase === 'done' ? () => ack('quiz') : undefined} />;
   } else if (status === 'MAIN_GAMES') {
-    screen = <Waiting state={state} title="Mini-games done!" text="Well played. Watch the big screen: the challenge phase opens when every team is done." showBoard />;
+    screen = <Waiting state={state} title="Mini-games done!" text="Well played. The challenge phase opens when the game clock reaches zero (or earlier, if the organisers open it)." showBoard showClock />;
   } else if (status === 'CHALLENGE_WINDOW') {
     screen = <ChallengeHub state={state} act={act} />;
   } else {
@@ -128,7 +133,7 @@ function TeamApp({ token, onLogout }) {
   }
 
   const fullscreenGame = !inMatch && gameStatuses.includes(status) && status !== 'FINISHED' &&
-    screen.type === RoboPath; // RoboPath shows both club logos in its own top bar
+    (screen.type === RoboPath || screen.type === Quiz); // these games show both club logos in their own top bar
 
   return (
     <FullscreenGuard title={`Team ${me.name}`} text="This device is now your team’s game screen. It must stay in full screen.">
@@ -251,18 +256,33 @@ function Lobby({ state, act }) {
 }
 
 /* --------------------------------------------------------- waiting -- */
-function Waiting({ state, title, text, showBoard = false }) {
+function GamesClock({ state }) {
+  useTicker(500);
+  const end = state.competition.mainGamesEndsAt;
+  if (!end || state.competition.status !== 'MAIN_GAMES') return null;
+  const left = Math.max(0, (end - serverNow(state)) / 1000);
+  return (
+    <div className="window-timer" role="timer">
+      <small>Challenge phase in</small>
+      <b className="mono">{clock(left)}</b>
+    </div>
+  );
+}
+
+function Waiting({ state, title, text, showBoard = false, showClock = false }) {
   return (
     <main className="page-main stack">
       <section className="card center-card">
         <h1>{title}</h1>
         <p className="muted">{text}</p>
+        {showClock && <GamesClock state={state} />}
         {state.me.rank && (
           <div className="big-stat">
             <div><small>Rank</small><b>{ordinal(state.me.rank)}</b></div>
             <div><small>Score</small><b>{state.me.score}</b></div>
             <div><small>RoboPath</small><b>{state.me.games.robopath.points}</b></div>
             <div><small>Locked Phone</small><b>{state.me.games.locked_phone.points}</b></div>
+            <div><small>N7 Quiz</small><b>{['completed', 'abandoned'].includes(state.me.games.quiz?.status) ? state.me.games.quiz.points : '–'}</b></div>
           </div>
         )}
       </section>
@@ -500,83 +520,25 @@ function LiveMatchStrip({ state }) {
   );
 }
 
+/** A team playing a Huruf match: the original huroof-challenge answer button. */
 function MatchPlayer({ state, act }) {
   const m = state.match;
-  const side = m.side;
-  const board = m.board;
   const a = state.teams.find((t) => t.id === m.challenge.challengerTeamId);
   const b = state.teams.find((t) => t.id === m.challenge.defenderTeamId);
-  const mine = side === 0 ? a : b;
-  const them = side === 0 ? b : a;
-  const names = [a?.name, b?.name];
-  const colors = [a?.colorHex, b?.colorHex];
-  useMatchSounds(board);
-  const [pressed, setPressed] = useState(false);
-
-  const canBuzz = board.phase === 'question' && board.armed;
-  const myTurn = board.phase === 'answer' && board.turn === side;
-  const theirTurn = board.phase === 'answer' && board.turn !== side;
-
   const buzz = useCallback(async () => {
-    if (!canBuzz) return;
-    setPressed(true);
-    navigator.vibrate?.(60);
     const res = await act('buzz');
-    setTimeout(() => setPressed(false), 250);
     if (!res.ok) toast(res.error, 'error');
-  }, [canBuzz, act]);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.code === 'Space' || e.key === 'Enter') {
-        e.preventDefault();
-        buzz();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [buzz]);
-
-  let label = 'Wait…';
-  if (canBuzz) label = 'BUZZ!';
-  else if (myTurn) label = 'Answer now!';
-  else if (theirTurn) label = `${them?.name} answers`;
-  else if (board.phase === 'question' && board.tried[side]) label = 'Already answered';
-  else if (board.phase === 'pick') label = board.chooser === side ? 'Your pick: name a letter!' : `${them?.name} picks`;
-  else if (board.phase === 'matchOver') label = board.matchWinner === side ? 'You won! 🏆' : 'Match lost';
-
+    return res;
+  }, [act]);
   return (
-    <main className="page-main match-player" style={{ '--mine': mine?.colorHex, '--mine-ink': inkOn(mine?.colorHex) }}>
-      <div className="mp-head">
-        <span className="team-tag" style={{ background: a?.colorHex, color: inkOn(a?.colorHex) }}>{a?.name}</span>
-        <RoundScore board={board} colors={colors} />
-        <span className="faint">vs</span>
-        <span className="team-tag" style={{ background: b?.colorHex, color: inkOn(b?.colorHex) }}>{b?.name}</span>
-        <span className="pill">±{m.challenge.lockedPointStake} pts</span>
-      </div>
-      <p className="mp-goal muted small">
-        You link the <b>{side === 0 ? 'left ↔ right' : 'top ↕ bottom'}</b> sides ({side === 0 ? 'challenger' : 'defender'}).
-      </p>
-      <div className="mp-body">
-        <div className="mp-buzz-wrap">
-          {board.letter && board.phase !== 'pick' && <div className="mp-letter" aria-label="Letter">{board.letter}</div>}
-          <button
-            type="button"
-            className={`buzzer ${canBuzz ? 'armed' : ''} ${myTurn ? 'mine' : ''} ${pressed ? 'pressed' : ''}`}
-            onClick={buzz}
-            disabled={!canBuzz}
-            data-testid="buzz"
-          >
-            {label}
-          </button>
-          <div className="mp-clock"><AnswerClock board={board} offset={state.offset} big /></div>
-          <p className="mp-phase">{phaseText(board, names)}</p>
-        </div>
-        <div className="mp-board">
-          <HuroofBoard board={board} colors={colors} names={names} />
-        </div>
-      </div>
-    </main>
+    <HfBuzzer
+      board={m.board}
+      side={m.side}
+      names={[a?.name, b?.name]}
+      colors={[a?.colorHex, b?.colorHex]}
+      stake={m.challenge.lockedPointStake}
+      onBuzz={buzz}
+    />
   );
 }
 
