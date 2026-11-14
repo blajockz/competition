@@ -225,7 +225,7 @@ export default function Register() {
               <p><b>On event day:</b> open your camera and scan the <b>check-in</b> QR code on the big screen. This phone remembers you, so it is one tap.</p>
             </Pass>
             <div className="rg-actions">
-              <button type="button" className="rg-link" onClick={() => { setAgain(true); setError(''); }} data-testid="rg-another">Register someone else on this phone</button>
+              <button type="button" className="rg-link" onClick={() => { setAgain(true); setError(''); }} data-testid="rg-another">Register someone else</button>
             </div>
           </>
         )}
